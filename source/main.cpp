@@ -4,12 +4,18 @@
 #include <nvvk/structs_vk.hpp>
 #include <nvvk/resourceallocator_vk.hpp>
 #include <nvvk/error_vk.hpp>
+#include <nvvk/shaders_vk.hpp>
+#include <nvvk/descriptorsets_vk.hpp>
+#include <nvh/fileoperations.hpp>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 
 static const uint64_t render_width = 800;
 static const uint64_t render_height = 600;
+
+static const uint64_t workgroup_width = 16;
+static const uint64_t workgroup_height = 8;
 
 int main(int argc, const char** argv)
 {
@@ -65,6 +71,55 @@ int main(int argc, const char** argv)
 	VkCommandPool cmdPool;
 	NVVK_CHECK(vkCreateCommandPool(context, &cmdPoolInfo, nullptr, &cmdPool));
 
+	// Here's the list of bindings for the descriptor set layout, from raytrace.comp.glsl:
+	// 0 - a storage buffer (the buffer `buffer`)
+	// That's it for now!
+	nvvk::DescriptorSetContainer descriptorSetContainer(context);
+	descriptorSetContainer.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+
+	// Create a layout from the list of bindings
+	descriptorSetContainer.initLayout();
+	// Create a descriptor pool from the list of bindings with space for 1 set, and allocate that set
+	descriptorSetContainer.initPool(1);
+	// Create a simple pipeline layout from the descriptor set layout:
+	descriptorSetContainer.initPipeLayout();
+
+	// Write a single descriptor in the descriptor set.
+	VkDescriptorBufferInfo descriptorBufferInfo{};
+	descriptorBufferInfo.buffer = buffer.buffer;    // The VkBuffer object
+	descriptorBufferInfo.range = bufferSizeBytes;  // The length of memory to bind; offset is 0.
+	VkWriteDescriptorSet writeDescriptor = descriptorSetContainer.makeWrite(0 /*set index*/, 0 /*binding*/, &descriptorBufferInfo);
+
+	vkUpdateDescriptorSets(context,              // The context
+		1, &writeDescriptor,  // An array of VkWriteDescriptorSet objects
+		0, nullptr);          // An array of VkCopyDescriptorSet objects (unused)
+
+	const std::string        exePath(argv[0], std::string(argv[0]).find_last_of("/\\") + 1);
+	std::vector<std::string> searchPaths = { exePath + PROJECT_RELDIRECTORY, exePath + PROJECT_RELDIRECTORY "..",
+											exePath + PROJECT_RELDIRECTORY "../..", exePath + PROJECT_NAME };
+
+	// Shader loading and pipeline creation
+	VkShaderModule rayTraceModule =
+		nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.comp.glsl.spv", true, searchPaths));
+
+	// Describes the entrypoint and the stage to use for this shader module in the pipeline
+	VkPipelineShaderStageCreateInfo shaderStageCreateInfo = nvvk::make<VkPipelineShaderStageCreateInfo>();
+	shaderStageCreateInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	shaderStageCreateInfo.module = rayTraceModule;
+	shaderStageCreateInfo.pName = "main";
+
+	// Create the compute pipeline
+	VkComputePipelineCreateInfo pipelineCreateInfo = nvvk::make<VkComputePipelineCreateInfo>();
+	pipelineCreateInfo.stage = shaderStageCreateInfo;
+	pipelineCreateInfo.layout = descriptorSetContainer.getPipeLayout();
+
+	VkPipeline computePipeline;
+	NVVK_CHECK(vkCreateComputePipelines(context,                 // Device
+		VK_NULL_HANDLE,          // Pipeline cache (uses default)
+		1, &pipelineCreateInfo,  // Compute pipeline create info
+		VK_NULL_HANDLE,          // Allocator (uses default)
+		&computePipeline));      // Output
+
 	// Allocate a command buffer
 	VkCommandBufferAllocateInfo cmdAllocInfo = nvvk::make<VkCommandBufferAllocateInfo>();
 	cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -78,19 +133,26 @@ int main(int argc, const char** argv)
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	NVVK_CHECK(vkBeginCommandBuffer(cmdBuffer, &beginInfo));
 
-	// Fill the buffer
-	const float fillValue = 0.5f;
-	const uint32_t& fillValueU32 = reinterpret_cast<const uint32_t&>(fillValue);
-	vkCmdFillBuffer(cmdBuffer, buffer.buffer, 0, bufferSizeBytes, fillValueU32);
+	// Bind the compute shader pipeline
+	vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+
+	// Bind the descriptor set
+	VkDescriptorSet descriptorSet = descriptorSetContainer.getSet(0);
+	vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, descriptorSetContainer.getPipeLayout(), 0, 1,
+		&descriptorSet, 0, nullptr);
+
+	// Run the compute shader with enough workgroups to cover the entire buffer:
+	vkCmdDispatch(cmdBuffer, (uint32_t(render_width) + workgroup_width - 1) / workgroup_width,
+		(uint32_t(render_height) + workgroup_height - 1) / workgroup_height, 1);
 
 	// Add a command that says "Make it so that memory writes by the vkCmdFillBuffer call
 	// are available to read from the CPU." (In other words, "Flush the GPU caches
 	// so the CPU can read the data.") To do this, we use a memory barrier.
 	VkMemoryBarrier memoryBarrier = nvvk::make<VkMemoryBarrier>();
-	memoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;  // Make transfer writes
+	memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;	 // Make shader writes
 	memoryBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;       // Readable by the CPU
 	vkCmdPipelineBarrier(cmdBuffer,                              // The command buffer
-		VK_PIPELINE_STAGE_TRANSFER_BIT,           // From the transfer stage
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,     // From the transfer stage
 		VK_PIPELINE_STAGE_HOST_BIT,               // To the CPU
 		0,                                        // No special flags
 		1, &memoryBarrier,                        // An array of memory barriers
@@ -109,12 +171,15 @@ int main(int argc, const char** argv)
 
 	// Wait for the GPU to finish
 	NVVK_CHECK(vkQueueWaitIdle(context.m_queueGCT));
-
+	
 	// Get the image data back from the GPU
 	void* data = allocator.map(buffer);
 	stbi_write_hdr("out.hdr", render_width, render_height, 3, reinterpret_cast<float*>(data));
 	allocator.unmap(buffer);
 
+	vkDestroyPipeline(context, computePipeline, nullptr);
+	vkDestroyShaderModule(context, rayTraceModule, nullptr);
+	descriptorSetContainer.deinit();
 	vkFreeCommandBuffers(context, cmdPool, 1, &cmdBuffer);
 	vkDestroyCommandPool(context, cmdPool, nullptr);
 	allocator.destroy(buffer);
