@@ -1,4 +1,5 @@
 #include <cassert>
+#include <array>
 
 #include <nvvk/context_vk.hpp>
 #include <nvvk/structs_vk.hpp>
@@ -6,16 +7,51 @@
 #include <nvvk/error_vk.hpp>
 #include <nvvk/shaders_vk.hpp>
 #include <nvvk/descriptorsets_vk.hpp>
+#include <nvvk/raytraceKHR_vk.hpp>
 #include <nvh/fileoperations.hpp>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
 
 static const uint64_t render_width = 800;
 static const uint64_t render_height = 600;
 
 static const uint64_t workgroup_width = 16;
 static const uint64_t workgroup_height = 8;
+
+VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
+{
+	VkCommandBufferAllocateInfo cmdAllocInfo = nvvk::make<VkCommandBufferAllocateInfo>();
+	cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	cmdAllocInfo.commandPool = cmdPool;
+	cmdAllocInfo.commandBufferCount = 1;
+	VkCommandBuffer cmdBuffer;
+	NVVK_CHECK(vkAllocateCommandBuffers(device, &cmdAllocInfo, &cmdBuffer));
+	VkCommandBufferBeginInfo beginInfo = nvvk::make<VkCommandBufferBeginInfo>();
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	NVVK_CHECK(vkBeginCommandBuffer(cmdBuffer, &beginInfo));
+	return cmdBuffer;
+}
+
+void EndSubmitWaitAndFreeCommandBuffer(VkDevice device, VkQueue queue, VkCommandPool cmdPool, VkCommandBuffer& cmdBuffer)
+{
+	NVVK_CHECK(vkEndCommandBuffer(cmdBuffer));
+	VkSubmitInfo submitInfo = nvvk::make<VkSubmitInfo>();
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &cmdBuffer;
+	NVVK_CHECK(vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE));
+	NVVK_CHECK(vkQueueWaitIdle(queue));
+	vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuffer);
+}
+
+VkDeviceAddress GetBufferDeviceAddress(VkDevice device, VkBuffer buffer)
+{
+	VkBufferDeviceAddressInfo addressInfo = nvvk::make<VkBufferDeviceAddressInfo>();
+	addressInfo.buffer = buffer;
+	return vkGetBufferDeviceAddress(device, &addressInfo);
+}
 
 int main(int argc, const char** argv)
 {
@@ -71,11 +107,111 @@ int main(int argc, const char** argv)
 	VkCommandPool cmdPool;
 	NVVK_CHECK(vkCreateCommandPool(context, &cmdPoolInfo, nullptr, &cmdPool));
 
+	// Load the mesh of the first shape from an OBJ file
+	const std::string        exePath(argv[0], std::string(argv[0]).find_last_of("/\\") + 1);
+	std::vector<std::string> searchPaths = { exePath + PROJECT_RELDIRECTORY, exePath + PROJECT_RELDIRECTORY "..",
+											exePath + PROJECT_RELDIRECTORY "../..", exePath + PROJECT_NAME };
+	tinyobj::ObjReader       reader;  // Used to read an OBJ file
+	reader.ParseFromFile(nvh::findFile("resources/scenes/CornellBox-Original-Merged.obj", searchPaths));
+	assert(reader.Valid());  // Make sure tinyobj was able to parse this file
+
+	const std::vector<tinyobj::real_t>   objVertices = reader.GetAttrib().GetVertices();
+	const std::vector<tinyobj::shape_t>& objShapes = reader.GetShapes();  // All shapes in the file
+	assert(objShapes.size() == 1);                                          // Check that this file has only one shape
+	const tinyobj::shape_t& objShape = objShapes[0];                        // Get the first shape
+
+	// Get the indices of the vertices of the first mesh of `objShape` in `attrib.vertices`:
+	std::vector<uint32_t> objIndices;
+	objIndices.reserve(objShape.mesh.indices.size());
+	for (const tinyobj::index_t& index : objShape.mesh.indices)
+	{
+		objIndices.push_back(index.vertex_index);
+	}
+
+	// Upload the vertex and index buffers to the GPU.
+	nvvk::Buffer vertexBuffer, indexBuffer;
+	{
+		// Start a command buffer for uploading the buffers
+		VkCommandBuffer uploadCmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
+		// We get these buffers' device addresses, and use them as storage buffers and build inputs.
+		const VkBufferUsageFlags usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+			| VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+		vertexBuffer = allocator.createBuffer(uploadCmdBuffer, objVertices, usage);
+		indexBuffer = allocator.createBuffer(uploadCmdBuffer, objIndices, usage);
+		EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, uploadCmdBuffer);
+		allocator.finalizeAndReleaseStaging();
+	}
+
+	// Describe the bottom-level acceleration structure (BLAS)
+	std::vector<nvvk::RaytracingBuilderKHR::BlasInput> blases;
+	{
+		nvvk::RaytracingBuilderKHR::BlasInput blas;
+		// Get the device addresses of the vertex and index buffers
+		VkDeviceAddress vertexBufferAddress = GetBufferDeviceAddress(context, vertexBuffer.buffer);
+		VkDeviceAddress indexBufferAddress = GetBufferDeviceAddress(context, indexBuffer.buffer);
+
+		// Specify where the builder can find the vertices and indices for triangles, and their formats:
+		VkAccelerationStructureGeometryTrianglesDataKHR triangles = nvvk::make<VkAccelerationStructureGeometryTrianglesDataKHR>();
+		triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+		triangles.vertexData.deviceAddress = vertexBufferAddress;
+		triangles.vertexStride = 3 * sizeof(float);
+		triangles.maxVertex = static_cast<uint32_t>(objVertices.size() / 3 - 1);
+		triangles.indexType = VK_INDEX_TYPE_UINT32;
+		triangles.indexData.deviceAddress = indexBufferAddress;
+		triangles.transformData.deviceAddress = 0;  // No transform
+
+		// Create a VkAccelerationStructureGeometryKHR object that says it handles opaque triangles and points to the above:
+		VkAccelerationStructureGeometryKHR geometry = nvvk::make<VkAccelerationStructureGeometryKHR>();
+		geometry.geometry.triangles = triangles;
+		geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+		geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR | VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
+		blas.asGeometry.push_back(geometry);
+
+		// Create offset info that allows us to say how many triangles and vertices to read
+		VkAccelerationStructureBuildRangeInfoKHR offsetInfo; 
+		offsetInfo.firstVertex = 0;
+		offsetInfo.primitiveCount = static_cast<uint32_t>(objIndices.size() / 3);  // Number of triangles
+		offsetInfo.primitiveOffset = 0;
+		offsetInfo.transformOffset = 0;
+		blas.asBuildOffsetInfo.push_back(offsetInfo);
+		blases.push_back(blas);
+	}
+
+	// Create the BLAS
+	nvvk::RaytracingBuilderKHR raytracingBuilder;
+	raytracingBuilder.setup(context, &allocator, context.m_queueGCT);
+	// TODO: If BLAS changes needs updates each frame (not static) this should be implemented differently
+	// because nvvk::RaytracingBuilderKHR::buildBlas makes CPU wait for the GPU to build the BLAS.
+	// Also, if the geometry is static or updated rarely, it's worth to use compaction to save memory.
+	raytracingBuilder.buildBlas(blases, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
+
+
+	// Create an instance pointing to this BLAS, and build it into a TLAS:
+	std::vector<VkAccelerationStructureInstanceKHR> instances;
+	{
+		VkAccelerationStructureInstanceKHR instance{};
+		instance.accelerationStructureReference = raytracingBuilder.getBlasDeviceAddress(0);  // The address of the BLAS in `blases` that this instance points to
+		// Set the instance transform to the identity matrix:
+		instance.transform.matrix[0][0] = instance.transform.matrix[1][1] = instance.transform.matrix[2][2] = 1.0f;
+		instance.instanceCustomIndex = 0;  // 24 bits accessible to ray shaders via rayQueryGetIntersectionInstanceCustomIndexEXT
+		// Used for a shader offset index, accessible via rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT
+		instance.instanceShaderBindingTableRecordOffset = 0;
+		instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;  // How to trace this instance
+		instance.mask = 0xFF;
+		instances.push_back(instance);
+	}
+	raytracingBuilder.buildTlas(instances, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
+
 	// Here's the list of bindings for the descriptor set layout, from raytrace.comp.glsl:
 	// 0 - a storage buffer (the buffer `buffer`)
-	// That's it for now!
+	// 1 - an acceleration structure (the TLAS)
+	// 2 - storage buffer (for vertex buffer)
+	// 3 - storage buffer (for index buffer)
 	nvvk::DescriptorSetContainer descriptorSetContainer(context);
 	descriptorSetContainer.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+	descriptorSetContainer.addBinding(1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+	descriptorSetContainer.addBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+	descriptorSetContainer.addBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 
 	// Create a layout from the list of bindings
 	descriptorSetContainer.initLayout();
@@ -84,19 +220,34 @@ int main(int argc, const char** argv)
 	// Create a simple pipeline layout from the descriptor set layout:
 	descriptorSetContainer.initPipeLayout();
 
-	// Write a single descriptor in the descriptor set.
+	// Write values into the descriptor set.
+	std::array<VkWriteDescriptorSet, 4> writeDescriptorSets;
+	// 0
 	VkDescriptorBufferInfo descriptorBufferInfo{};
 	descriptorBufferInfo.buffer = buffer.buffer;    // The VkBuffer object
 	descriptorBufferInfo.range = bufferSizeBytes;  // The length of memory to bind; offset is 0.
-	VkWriteDescriptorSet writeDescriptor = descriptorSetContainer.makeWrite(0 /*set index*/, 0 /*binding*/, &descriptorBufferInfo);
+	writeDescriptorSets[0] = descriptorSetContainer.makeWrite(0 /*set index*/, 0 /*binding*/, &descriptorBufferInfo);
+	// 1
+	VkWriteDescriptorSetAccelerationStructureKHR descriptorAS = nvvk::make<VkWriteDescriptorSetAccelerationStructureKHR>();
+	VkAccelerationStructureKHR tlasCopy = raytracingBuilder.getAccelerationStructure();  // So that we can take its address
+	descriptorAS.accelerationStructureCount = 1;
+	descriptorAS.pAccelerationStructures = &tlasCopy;
+	writeDescriptorSets[1] = descriptorSetContainer.makeWrite(0, 1, &descriptorAS);
+	// 2
+	VkDescriptorBufferInfo vertexDescriptorBufferInfo{};
+	vertexDescriptorBufferInfo.buffer = vertexBuffer.buffer;
+	vertexDescriptorBufferInfo.range = VK_WHOLE_SIZE;
+	writeDescriptorSets[2] = descriptorSetContainer.makeWrite(0, 2, &vertexDescriptorBufferInfo);
+	// 3
+	VkDescriptorBufferInfo indexDescriptorBufferInfo{};
+	indexDescriptorBufferInfo.buffer = indexBuffer.buffer;
+	indexDescriptorBufferInfo.range = VK_WHOLE_SIZE;
+	writeDescriptorSets[3] = descriptorSetContainer.makeWrite(0, 3, &indexDescriptorBufferInfo);
 
-	vkUpdateDescriptorSets(context,              // The context
-		1, &writeDescriptor,  // An array of VkWriteDescriptorSet objects
-		0, nullptr);          // An array of VkCopyDescriptorSet objects (unused)
-
-	const std::string        exePath(argv[0], std::string(argv[0]).find_last_of("/\\") + 1);
-	std::vector<std::string> searchPaths = { exePath + PROJECT_RELDIRECTORY, exePath + PROJECT_RELDIRECTORY "..",
-											exePath + PROJECT_RELDIRECTORY "../..", exePath + PROJECT_NAME };
+	vkUpdateDescriptorSets(context,                                            // The context
+		static_cast<uint32_t>(writeDescriptorSets.size()),  // Number of VkWriteDescriptorSet objects
+		writeDescriptorSets.data(),                         // Pointer to VkWriteDescriptorSet objects
+		0, nullptr);  // An array of VkCopyDescriptorSet objects (unused)
 
 	// Shader loading and pipeline creation
 	VkShaderModule rayTraceModule =
@@ -120,18 +271,8 @@ int main(int argc, const char** argv)
 		VK_NULL_HANDLE,          // Allocator (uses default)
 		&computePipeline));      // Output
 
-	// Allocate a command buffer
-	VkCommandBufferAllocateInfo cmdAllocInfo = nvvk::make<VkCommandBufferAllocateInfo>();
-	cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	cmdAllocInfo.commandPool = cmdPool;
-	cmdAllocInfo.commandBufferCount = 1;
-	VkCommandBuffer cmdBuffer;
-	NVVK_CHECK(vkAllocateCommandBuffers(context, &cmdAllocInfo, &cmdBuffer));
-
-	// Begin recording
-	VkCommandBufferBeginInfo beginInfo = nvvk::make<VkCommandBufferBeginInfo>();
-	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	NVVK_CHECK(vkBeginCommandBuffer(cmdBuffer, &beginInfo));
+	// Create and start recording a command buffer
+	VkCommandBuffer cmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
 
 	// Bind the compute shader pipeline
 	vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
@@ -158,14 +299,8 @@ int main(int argc, const char** argv)
 		1, &memoryBarrier,                        // An array of memory barriers
 		0, nullptr, 0, nullptr);                  // No other barriers
 
-	// End recording
-	NVVK_CHECK(vkEndCommandBuffer(cmdBuffer));
-
-	// Submit the command buffer
-	VkSubmitInfo submitInfo = nvvk::make<VkSubmitInfo>();
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &cmdBuffer;
-	NVVK_CHECK(vkQueueSubmit(context.m_queueGCT, 1, &submitInfo, VK_NULL_HANDLE));
+	// End and submit the command buffer, then wait for it to finish:
+	EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, cmdBuffer);
 	// TODO: vkQueueSubmit is handled by the OS (much slower than Vulkan)
 	// Ideally we wanna batch submit command buffers
 
@@ -180,7 +315,9 @@ int main(int argc, const char** argv)
 	vkDestroyPipeline(context, computePipeline, nullptr);
 	vkDestroyShaderModule(context, rayTraceModule, nullptr);
 	descriptorSetContainer.deinit();
-	vkFreeCommandBuffers(context, cmdPool, 1, &cmdBuffer);
+	raytracingBuilder.destroy();
+	allocator.destroy(vertexBuffer);
+	allocator.destroy(indexBuffer);
 	vkDestroyCommandPool(context, cmdPool, nullptr);
 	allocator.destroy(buffer);
 	allocator.deinit();
