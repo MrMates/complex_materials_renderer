@@ -39,6 +39,7 @@ struct HitInfo
   vec3 color;
   vec3 worldPosition;
   vec3 worldNormal;
+  uint matID;
 };
 
 HitInfo getObjectHitInfo(rayQueryEXT rayQuery)
@@ -46,6 +47,9 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery)
   HitInfo result;
   // Get the ID of the triangle
   const int primitiveID = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, true);
+
+  const uint matID = rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT(rayQuery, true);
+  result.matID = matID;
 
   // Get the indices of the vertices of the triangle
   const uint i0 = indices[3 * primitiveID + 0];
@@ -63,8 +67,9 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery)
 
   // Compute the coordinates of the intersection
   const vec3 objectPos = v0 * barycentrics.x + v1 * barycentrics.y + v2 * barycentrics.z;
-  // For the main tutorial, object space is the same as world space:
-  result.worldPosition = objectPos;
+  // Transform from object space to world space:
+  const mat4x3 objectToWorld = rayQueryGetIntersectionObjectToWorldEXT(rayQuery, true);
+  result.worldPosition       = objectToWorld * vec4(objectPos, 1.0f);
 
   // Compute the normal of the triangle in object space, using the right-hand rule:
   //    v2      .
@@ -75,11 +80,23 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery)
   //   /|    \  .
   //  L v0---v1 .
   // n
-  const vec3 objectNormal = normalize(cross(v1 - v0, v2 - v0));
+  const vec3 objectNormal = cross(v1 - v0, v2 - v0);
+  // Get object to world inverse matrix
+  const mat4x3 objectToWorldInverse = rayQueryGetIntersectionWorldToObjectEXT(rayQuery, true);
   // For the main tutorial, object space is the same as world space:
-  result.worldNormal = objectNormal;
+  result.worldNormal = normalize((objectNormal * objectToWorldInverse).xyz);
 
-  result.color = vec3(0.7f);
+  result.color = vec3(0.8f);
+
+  const float dotX = dot(result.worldNormal, vec3(1.0, 0.0, 0.0));
+  if(dotX > 0.99)
+  {
+    result.color = vec3(0.8, 0.0, 0.0);
+  }
+  else if(dotX < -0.99)
+  {
+    result.color = vec3(0.0, 0.8, 0.0);
+  }
 
   return result;
 }
@@ -104,7 +121,7 @@ void main()
 {
   // The resolution of the buffer, which in this case is a hardcoded vector
   // of 2 unsigned integers:
-  const uvec2 resolution = uvec2(800, 600);
+  const uvec2 resolution = uvec2(1920, 1080);
 
   // Get the coordinates of the pixel for this invocation:
   //
@@ -126,8 +143,8 @@ void main()
 
   // This scene uses a right-handed coordinate system like the OBJ file format, where the
   // +x axis points right, the +y axis points up, and the -z axis points into the screen.
-  // The camera is located at (-0.001, 1, 6).
-  const vec3 cameraOrigin = vec3(-0.001, 1.0, 6.0);
+  // The camera is located at (-0.001, 0, 53).
+  const vec3 cameraOrigin = vec3(-0.001, 0.0, 10.0);
   // Define the field of view by the vertical slope of the topmost rays:
   const float fovVerticalSlope = 1.0 / 5.0;
 

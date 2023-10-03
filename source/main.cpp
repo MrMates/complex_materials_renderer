@@ -1,5 +1,7 @@
 #include <cassert>
 #include <array>
+#include <iostream>
+#include <random>
 
 #include <nvvk/context_vk.hpp>
 #include <nvvk/structs_vk.hpp>
@@ -14,9 +16,10 @@
 #include <stb_image_write.h>
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
+#include <GLFW/glfw3.h>
 
-static const uint64_t render_width = 800;
-static const uint64_t render_height = 600;
+static const uint64_t render_width = 1920;
+static const uint64_t render_height = 1080;
 
 static const uint64_t workgroup_width = 16;
 static const uint64_t workgroup_height = 8;
@@ -73,9 +76,38 @@ int main(int argc, const char** argv)
 	VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures = nvvk::make<VkPhysicalDeviceRayQueryFeaturesKHR>();
 	deviceInfo.addDeviceExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME, false, &rayQueryFeatures);
 
+	deviceInfo.addInstanceExtension(VK_KHR_SURFACE_EXTENSION_NAME, false);
+	deviceInfo.addInstanceExtension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, false);
+
 	context.init(deviceInfo);            // Initialize the context
 	// Device must support acceleration structures and ray queries:
 	assert(asFeatures.accelerationStructure == VK_TRUE && rayQueryFeatures.rayQuery == VK_TRUE);
+
+	//// Initializing GLFW
+	//if (!glfwInit())
+	//{
+	//	std::cerr << "Failed to initialize GLFW";
+	//	return -1;
+	//}
+
+	//// Creating the window with GLFW and no default surface (we'll use Vulkan)
+	//glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+	//GLFWwindow* window = glfwCreateWindow(640, 480, "Complex Materials Renderer", NULL, NULL);
+	//if (!window)
+	//{
+	//	std::cerr << "Failed to create the window";
+	//	return -1;
+	//}
+
+	//// Creating a surface that we can draw to
+	//VkSurfaceKHR surface;
+	//VkResult err = glfwCreateWindowSurface(context.m_instance, window, NULL, &surface);
+	//if (err)
+	//{
+	//	std::cerr << "Failed to create the window surface";
+	//	return -1;
+	//}
+
 
 	/* MEMORY SETUP */
 
@@ -112,13 +144,18 @@ int main(int argc, const char** argv)
 	std::vector<std::string> searchPaths = { exePath + PROJECT_RELDIRECTORY, exePath + PROJECT_RELDIRECTORY "..",
 											exePath + PROJECT_RELDIRECTORY "../..", exePath + PROJECT_NAME };
 	tinyobj::ObjReader       reader;  // Used to read an OBJ file
-	reader.ParseFromFile(nvh::findFile("resources/scenes/CornellBox-Original-Merged.obj", searchPaths));
+	tinyobj::ObjReaderConfig readerConfig;
+	readerConfig.mtl_search_path = searchPaths[0];
+	reader.ParseFromFile(nvh::findFile("resources/scenes/untitled.obj", searchPaths));
 	assert(reader.Valid());  // Make sure tinyobj was able to parse this file
 
 	const std::vector<tinyobj::real_t>   objVertices = reader.GetAttrib().GetVertices();
 	const std::vector<tinyobj::shape_t>& objShapes = reader.GetShapes();  // All shapes in the file
 	assert(objShapes.size() == 1);                                          // Check that this file has only one shape
 	const tinyobj::shape_t& objShape = objShapes[0];                        // Get the first shape
+
+	auto materials = reader.GetMaterials();
+	std::cout << "Read material illum: " << materials[0].illum;
 
 	// Get the indices of the vertices of the first mesh of `objShape` in `attrib.vertices`:
 	std::vector<uint32_t> objIndices;
@@ -188,17 +225,32 @@ int main(int argc, const char** argv)
 
 	// Create an instance pointing to this BLAS, and build it into a TLAS:
 	std::vector<VkAccelerationStructureInstanceKHR> instances;
+	std::default_random_engine randEngine;
+	std::uniform_real_distribution<float> uniformDist(-.5f, .5f);
+	for (int x = 0; x <= 1; x++)
 	{
-		VkAccelerationStructureInstanceKHR instance{};
-		instance.accelerationStructureReference = raytracingBuilder.getBlasDeviceAddress(0);  // The address of the BLAS in `blases` that this instance points to
-		// Set the instance transform to the identity matrix:
-		instance.transform.matrix[0][0] = instance.transform.matrix[1][1] = instance.transform.matrix[2][2] = 1.0f;
-		instance.instanceCustomIndex = 0;  // 24 bits accessible to ray shaders via rayQueryGetIntersectionInstanceCustomIndexEXT
-		// Used for a shader offset index, accessible via rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT
-		instance.instanceShaderBindingTableRecordOffset = 0;
-		instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;  // How to trace this instance
-		instance.mask = 0xFF;
-		instances.push_back(instance);
+		for (int y = 0; y <= 1; y++)
+		{
+			// Creating a transform matrix
+			nvmath::mat4f transform(1);
+
+			transform.translate(nvmath::vec3f(float(x), float(y), 0.0f));
+			transform.scale(1.0 / 3.0);
+			transform.rotate(uniformDist(randEngine), nvmath::vec3f(0.0f, 1.0f, 0.0f));
+			transform.rotate(uniformDist(randEngine), nvmath::vec3f(1.0f, 0.0f, 0.0f));
+
+			VkAccelerationStructureInstanceKHR instance{};
+			instance.accelerationStructureReference = raytracingBuilder.getBlasDeviceAddress(0);  // The address of the BLAS in `blases` that this instance points to
+			// Set the instance transform to the identity matrix:
+			instance.transform = nvvk::toTransformMatrixKHR(transform);
+			instance.instanceCustomIndex = 0;  // 24 bits accessible to ray shaders via rayQueryGetIntersectionInstanceCustomIndexEXT
+			// Used for a shader offset index, accessible via rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT
+			instance.instanceShaderBindingTableRecordOffset = x;
+			instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;  // How to trace this instance
+			instance.mask = 0xFF;
+			instances.push_back(instance);
+		}
+		
 	}
 	raytracingBuilder.buildTlas(instances, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
 
@@ -273,6 +325,7 @@ int main(int argc, const char** argv)
 
 	// Create and start recording a command buffer
 	VkCommandBuffer cmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
+	
 
 	// Bind the compute shader pipeline
 	vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
@@ -307,10 +360,17 @@ int main(int argc, const char** argv)
 	// Wait for the GPU to finish
 	NVVK_CHECK(vkQueueWaitIdle(context.m_queueGCT));
 	
+
 	// Get the image data back from the GPU
 	void* data = allocator.map(buffer);
 	stbi_write_hdr("out.hdr", render_width, render_height, 3, reinterpret_cast<float*>(data));
 	allocator.unmap(buffer);
+
+	// Window system loop
+	//while (!glfwWindowShouldClose(window))
+	//{
+	//	glfwPollEvents();
+	//}
 
 	vkDestroyPipeline(context, computePipeline, nullptr);
 	vkDestroyShaderModule(context, rayTraceModule, nullptr);
@@ -321,5 +381,6 @@ int main(int argc, const char** argv)
 	vkDestroyCommandPool(context, cmdPool, nullptr);
 	allocator.destroy(buffer);
 	allocator.deinit();
+	//vkDestroySurfaceKHR(context.m_instance, surface, nullptr);
 	context.deinit();                    // Don't forget to clean up at the end of the program!
 }
