@@ -12,11 +12,14 @@
 #include <nvvk/raytraceKHR_vk.hpp>
 #include <nvh/fileoperations.hpp>
 
+#include <model.hpp>
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
+
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
-#include <GLFW/glfw3.h>
+
 
 static const uint64_t render_width = 1920;
 static const uint64_t render_height = 1080;
@@ -73,41 +76,23 @@ int main(int argc, const char** argv)
 	VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures = nvvk::make<VkPhysicalDeviceAccelerationStructureFeaturesKHR>();
 	deviceInfo.addDeviceExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, false, &asFeatures);
 
+	VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures = nvvk::make<VkPhysicalDeviceRayTracingPipelineFeaturesKHR>();
+	deviceInfo.addDeviceExtension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, false, &rtPipelineFeatures);
+
+	// TODO: delete after ray tracing is implemented
 	VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures = nvvk::make<VkPhysicalDeviceRayQueryFeaturesKHR>();
 	deviceInfo.addDeviceExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME, false, &rayQueryFeatures);
-
-	deviceInfo.addInstanceExtension(VK_KHR_SURFACE_EXTENSION_NAME, false);
-	deviceInfo.addInstanceExtension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, false);
+	// --
 
 	context.init(deviceInfo);            // Initialize the context
 	// Device must support acceleration structures and ray queries:
-	assert(asFeatures.accelerationStructure == VK_TRUE && rayQueryFeatures.rayQuery == VK_TRUE);
+	assert(asFeatures.accelerationStructure == VK_TRUE && rtPipelineFeatures.rayTracingPipeline == VK_TRUE);
 
-	//// Initializing GLFW
-	//if (!glfwInit())
-	//{
-	//	std::cerr << "Failed to initialize GLFW";
-	//	return -1;
-	//}
-
-	//// Creating the window with GLFW and no default surface (we'll use Vulkan)
-	//glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-	//GLFWwindow* window = glfwCreateWindow(640, 480, "Complex Materials Renderer", NULL, NULL);
-	//if (!window)
-	//{
-	//	std::cerr << "Failed to create the window";
-	//	return -1;
-	//}
-
-	//// Creating a surface that we can draw to
-	//VkSurfaceKHR surface;
-	//VkResult err = glfwCreateWindowSurface(context.m_instance, window, NULL, &surface);
-	//if (err)
-	//{
-	//	std::cerr << "Failed to create the window surface";
-	//	return -1;
-	//}
-
+	// Requesting physical device raytracing properties
+	VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProperties = nvvk::make<VkPhysicalDeviceRayTracingPipelinePropertiesKHR>();
+	VkPhysicalDeviceProperties2 prop2 = nvvk::make<VkPhysicalDeviceProperties2>();
+	prop2.pNext = &rtProperties;
+	vkGetPhysicalDeviceProperties2(context.m_physicalDevice, &prop2);
 
 	/* MEMORY SETUP */
 
@@ -146,24 +131,10 @@ int main(int argc, const char** argv)
 	tinyobj::ObjReader       reader;  // Used to read an OBJ file
 	tinyobj::ObjReaderConfig readerConfig;
 	readerConfig.mtl_search_path = searchPaths[0];
-	reader.ParseFromFile(nvh::findFile("resources/scenes/untitled.obj", searchPaths));
+	reader.ParseFromFile(nvh::findFile("resources/scenes/cube.obj", searchPaths));
 	assert(reader.Valid());  // Make sure tinyobj was able to parse this file
 
-	const std::vector<tinyobj::real_t>   objVertices = reader.GetAttrib().GetVertices();
-	const std::vector<tinyobj::shape_t>& objShapes = reader.GetShapes();  // All shapes in the file
-	assert(objShapes.size() == 1);                                          // Check that this file has only one shape
-	const tinyobj::shape_t& objShape = objShapes[0];                        // Get the first shape
-
-	auto materials = reader.GetMaterials();
-	std::cout << "Read material illum: " << materials[0].illum;
-
-	// Get the indices of the vertices of the first mesh of `objShape` in `attrib.vertices`:
-	std::vector<uint32_t> objIndices;
-	objIndices.reserve(objShape.mesh.indices.size());
-	for (const tinyobj::index_t& index : objShape.mesh.indices)
-	{
-		objIndices.push_back(index.vertex_index);
-	}
+	Model model { reader };
 
 	// Upload the vertex and index buffers to the GPU.
 	nvvk::Buffer vertexBuffer, indexBuffer;
@@ -173,46 +144,16 @@ int main(int argc, const char** argv)
 		// We get these buffers' device addresses, and use them as storage buffers and build inputs.
 		const VkBufferUsageFlags usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
 			| VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-		vertexBuffer = allocator.createBuffer(uploadCmdBuffer, objVertices, usage);
-		indexBuffer = allocator.createBuffer(uploadCmdBuffer, objIndices, usage);
+		vertexBuffer = allocator.createBuffer(uploadCmdBuffer, model.objVertices, usage);
+		indexBuffer = allocator.createBuffer(uploadCmdBuffer, model.objIndices, usage);
 		EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, uploadCmdBuffer);
 		allocator.finalizeAndReleaseStaging();
 	}
 
 	// Describe the bottom-level acceleration structure (BLAS)
 	std::vector<nvvk::RaytracingBuilderKHR::BlasInput> blases;
-	{
-		nvvk::RaytracingBuilderKHR::BlasInput blas;
-		// Get the device addresses of the vertex and index buffers
-		VkDeviceAddress vertexBufferAddress = GetBufferDeviceAddress(context, vertexBuffer.buffer);
-		VkDeviceAddress indexBufferAddress = GetBufferDeviceAddress(context, indexBuffer.buffer);
 
-		// Specify where the builder can find the vertices and indices for triangles, and their formats:
-		VkAccelerationStructureGeometryTrianglesDataKHR triangles = nvvk::make<VkAccelerationStructureGeometryTrianglesDataKHR>();
-		triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-		triangles.vertexData.deviceAddress = vertexBufferAddress;
-		triangles.vertexStride = 3 * sizeof(float);
-		triangles.maxVertex = static_cast<uint32_t>(objVertices.size() / 3 - 1);
-		triangles.indexType = VK_INDEX_TYPE_UINT32;
-		triangles.indexData.deviceAddress = indexBufferAddress;
-		triangles.transformData.deviceAddress = 0;  // No transform
-
-		// Create a VkAccelerationStructureGeometryKHR object that says it handles opaque triangles and points to the above:
-		VkAccelerationStructureGeometryKHR geometry = nvvk::make<VkAccelerationStructureGeometryKHR>();
-		geometry.geometry.triangles = triangles;
-		geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-		geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR | VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
-		blas.asGeometry.push_back(geometry);
-
-		// Create offset info that allows us to say how many triangles and vertices to read
-		VkAccelerationStructureBuildRangeInfoKHR offsetInfo; 
-		offsetInfo.firstVertex = 0;
-		offsetInfo.primitiveCount = static_cast<uint32_t>(objIndices.size() / 3);  // Number of triangles
-		offsetInfo.primitiveOffset = 0;
-		offsetInfo.transformOffset = 0;
-		blas.asBuildOffsetInfo.push_back(offsetInfo);
-		blases.push_back(blas);
-	}
+	blases.push_back(model.GetBLASInput(context, vertexBuffer, indexBuffer));
 
 	// Create the BLAS
 	nvvk::RaytracingBuilderKHR raytracingBuilder;
@@ -243,7 +184,7 @@ int main(int argc, const char** argv)
 			instance.accelerationStructureReference = raytracingBuilder.getBlasDeviceAddress(0);  // The address of the BLAS in `blases` that this instance points to
 			// Set the instance transform to the identity matrix:
 			instance.transform = nvvk::toTransformMatrixKHR(transform);
-			instance.instanceCustomIndex = 0;  // 24 bits accessible to ray shaders via rayQueryGetIntersectionInstanceCustomIndexEXT
+			instance.instanceCustomIndex = x;  // 24 bits accessible to ray shaders via rayQueryGetIntersectionInstanceCustomIndexEXT
 			// Used for a shader offset index, accessible via rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT
 			instance.instanceShaderBindingTableRecordOffset = x;
 			instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;  // How to trace this instance
@@ -326,7 +267,6 @@ int main(int argc, const char** argv)
 	// Create and start recording a command buffer
 	VkCommandBuffer cmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
 	
-
 	// Bind the compute shader pipeline
 	vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
 
@@ -360,17 +300,10 @@ int main(int argc, const char** argv)
 	// Wait for the GPU to finish
 	NVVK_CHECK(vkQueueWaitIdle(context.m_queueGCT));
 	
-
 	// Get the image data back from the GPU
 	void* data = allocator.map(buffer);
 	stbi_write_hdr("out.hdr", render_width, render_height, 3, reinterpret_cast<float*>(data));
 	allocator.unmap(buffer);
-
-	// Window system loop
-	//while (!glfwWindowShouldClose(window))
-	//{
-	//	glfwPollEvents();
-	//}
 
 	vkDestroyPipeline(context, computePipeline, nullptr);
 	vkDestroyShaderModule(context, rayTraceModule, nullptr);
@@ -381,6 +314,5 @@ int main(int argc, const char** argv)
 	vkDestroyCommandPool(context, cmdPool, nullptr);
 	allocator.destroy(buffer);
 	allocator.deinit();
-	//vkDestroySurfaceKHR(context.m_instance, surface, nullptr);
 	context.deinit();                    // Don't forget to clean up at the end of the program!
 }

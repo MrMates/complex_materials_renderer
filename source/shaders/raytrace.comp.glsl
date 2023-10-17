@@ -208,6 +208,11 @@ void main()
         // Apply color absorption
         accumulatedRayColor *= hitInfo.color;
 
+        if (hitInfo.matID == 1)
+        {
+          accumulatedRayColor = vec3(0);
+        }
+
         // Start a new ray at the hit position, but offset it slightly along
         // the normal against rayDirection:
         rayOrigin = hitInfo.worldPosition - 0.0001 * sign(dot(rayDirection, hitInfo.worldNormal)) * hitInfo.worldNormal;
