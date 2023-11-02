@@ -14,6 +14,7 @@
 #include <nvh/fileoperations.hpp>
 
 #include <model.hpp>
+#include <utils.hpp>
 #include <shaders/common.hpp>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -29,30 +30,10 @@ static const uint64_t render_height = 1080;
 static const uint64_t workgroup_width = 16;
 static const uint64_t workgroup_height = 8;
 
-VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
-{
-	VkCommandBufferAllocateInfo cmdAllocInfo = nvvk::make<VkCommandBufferAllocateInfo>();
-	cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	cmdAllocInfo.commandPool = cmdPool;
-	cmdAllocInfo.commandBufferCount = 1;
-	VkCommandBuffer cmdBuffer;
-	NVVK_CHECK(vkAllocateCommandBuffers(device, &cmdAllocInfo, &cmdBuffer));
-	VkCommandBufferBeginInfo beginInfo = nvvk::make<VkCommandBufferBeginInfo>();
-	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	NVVK_CHECK(vkBeginCommandBuffer(cmdBuffer, &beginInfo));
-	return cmdBuffer;
-}
-
-void EndSubmitWaitAndFreeCommandBuffer(VkDevice device, VkQueue queue, VkCommandPool cmdPool, VkCommandBuffer& cmdBuffer)
-{
-	NVVK_CHECK(vkEndCommandBuffer(cmdBuffer));
-	VkSubmitInfo submitInfo = nvvk::make<VkSubmitInfo>();
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &cmdBuffer;
-	NVVK_CHECK(vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE));
-	NVVK_CHECK(vkQueueWaitIdle(queue));
-	vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuffer);
-}
+struct SBTDiffuseData {
+	VkDeviceAddress vertexBuffer;
+	VkDeviceAddress indexBuffer;
+};
 
 VkDeviceAddress GetBufferDeviceAddress(VkDevice device, VkBuffer buffer)
 {
@@ -96,6 +77,7 @@ int main(int argc, const char** argv)
 	prop2.pNext = &rtProperties;
 	vkGetPhysicalDeviceProperties2(context.m_physicalDevice, &prop2);
 
+
 	/* MEMORY SETUP */
 
 	// Create the allocator
@@ -138,26 +120,18 @@ int main(int argc, const char** argv)
 	reader.ParseFromFile(nvh::findFile("resources/scenes/cube.obj", searchPaths));
 	assert(reader.Valid());  // Make sure tinyobj was able to parse this file
 
-	Model model { reader };
+	Model model { reader, allocator, context, cmdPool };
 
-	// Upload the vertex and index buffers to the GPU.
-	nvvk::Buffer vertexBuffer, indexBuffer;
-	{
-		// Start a command buffer for uploading the buffers
-		VkCommandBuffer uploadCmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
-		// We get these buffers' device addresses, and use them as storage buffers and build inputs.
-		const VkBufferUsageFlags usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-			| VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-		vertexBuffer = allocator.createBuffer(uploadCmdBuffer, model.objVertices, usage);
-		indexBuffer = allocator.createBuffer(uploadCmdBuffer, model.objIndices, usage);
-		EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, uploadCmdBuffer);
-		allocator.finalizeAndReleaseStaging();
-	}
+	reader.ParseFromFile(nvh::findFile("resources/scenes/box.obj", searchPaths));
+	assert(reader.Valid());  // Make sure tinyobj was able to parse this file
+
+	Model boxModel{ reader, allocator, context, cmdPool };
 
 	// Describe the bottom-level acceleration structure (BLAS)
 	std::vector<nvvk::RaytracingBuilderKHR::BlasInput> blases;
 
-	blases.push_back(model.GetBLASInput(context, vertexBuffer, indexBuffer));
+	blases.push_back(model.GetBLASInput(context, true));
+	blases.push_back(boxModel.GetBLASInput(context, true));
 
 	// Create the BLAS
 	nvvk::RaytracingBuilderKHR raytracingBuilder;
@@ -179,24 +153,43 @@ int main(int argc, const char** argv)
 			// Creating a transform matrix
 			nvmath::mat4f transform(1);
 
-			transform.translate(nvmath::vec3f(float(x), float(y), 0.0f));
+			transform.translate(nvmath::vec3f(float(x), float(y) + 2.f, 0.0f));
 			transform.scale(1.0 / 3.0);
-			transform.rotate(uniformDist(randEngine), nvmath::vec3f(0.0f, 1.0f, 0.0f));
-			transform.rotate(uniformDist(randEngine), nvmath::vec3f(1.0f, 0.0f, 0.0f));
+			//transform.rotate(uniformDist(randEngine), nvmath::vec3f(0.0f, 1.0f, 0.0f));
+			//transform.rotate(uniformDist(randEngine), nvmath::vec3f(1.0f, 0.0f, 0.0f));
 
 			VkAccelerationStructureInstanceKHR instance{};
 			instance.accelerationStructureReference = raytracingBuilder.getBlasDeviceAddress(0);  // The address of the BLAS in `blases` that this instance points to
 			// Set the instance transform to the identity matrix:
 			instance.transform = nvvk::toTransformMatrixKHR(transform);
-			instance.instanceCustomIndex = x;  // 24 bits accessible to ray shaders via rayQueryGetIntersectionInstanceCustomIndexEXT
+			instance.instanceCustomIndex = 0;  // 24 bits accessible to ray shaders via rayQueryGetIntersectionInstanceCustomIndexEXT
 			// Used for a shader offset index, accessible via rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT
-			instance.instanceShaderBindingTableRecordOffset = x;
+			instance.instanceShaderBindingTableRecordOffset = 0;
 			instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;  // How to trace this instance
 			instance.mask = 0xFF;
 			instances.push_back(instance);
 		}
 		
 	}
+
+	{
+		// Blas for the box
+		// Creating a transform matrix
+		nvmath::mat4f transform(1);
+		transform.translate(nvmath::vec3f(0.0f, -1.f, -50.0f));
+
+		VkAccelerationStructureInstanceKHR instance{};
+		instance.accelerationStructureReference = raytracingBuilder.getBlasDeviceAddress(1);  // The address of the BLAS in `blases` that this instance points to
+		// Set the instance transform to the identity matrix:
+		instance.transform = nvvk::toTransformMatrixKHR(transform);
+		instance.instanceCustomIndex = 0;  // 24 bits accessible to ray shaders via rayQueryGetIntersectionInstanceCustomIndexEXT
+		// Used for a shader offset index, accessible via rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT
+		instance.instanceShaderBindingTableRecordOffset = 0; // Offset to make it use the diffuse shader
+		instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;  // How to trace this instance
+		instance.mask = 0xFF;
+		instances.push_back(instance);
+	}
+
 	raytracingBuilder.buildTlas(instances, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
 
 
@@ -253,10 +246,18 @@ int main(int argc, const char** argv)
 	stage.module = nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.rmiss.glsl.spv", true, searchPaths));
 	stage.stage = VK_SHADER_STAGE_MISS_BIT_KHR;
 	stages[eMiss] = stage;
-	// Hit Group - Closest Hit
+	// Hit Group 1 - Closest Hit
 	stage.module = nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.rchit.glsl.spv", true, searchPaths));
 	stage.stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 	stages[eClosestHit] = stage;
+	//// Hit Group 1 - Any Hit
+	//stage.module = nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.rahit.glsl.spv", true, searchPaths));
+	//stage.stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+	//stages[eAnyHit] = stage;
+	//// Hit Group 2 - Closest Hit
+	//stage.module = nvvk::createShaderModule(context, nvh::loadFile("shaders/diffuse.rchit.glsl.spv", true, searchPaths));
+	//stage.stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+	//stages[eDiffuseCHit] = stage;
 
 	// Shader groups
 	std::vector<VkRayTracingShaderGroupCreateInfoKHR> shaderGroups;
@@ -276,14 +277,20 @@ int main(int argc, const char** argv)
 	group.generalShader = eMiss;
 	shaderGroups.push_back(group);
 
-	// Closest hit
+	// Hit group for media
 	// TODO: For volumetric media later, change this from triangles to procedural
 	// And write an intersection shader
 	group.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
 	group.generalShader = VK_SHADER_UNUSED_KHR;
 	group.closestHitShader = eClosestHit;
+	//group.anyHitShader = eAnyHit;
 	shaderGroups.push_back(group);
 
+	// Hit group for the scene (background box)
+	//group.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+	//group.generalShader = VK_SHADER_UNUSED_KHR;
+	//group.closestHitShader = eDiffuseCHit;
+	//shaderGroups.push_back(group);
 
 	// Assemble the shader stages and recursion depth info into the ray tracing pipeline
 	VkRayTracingPipelineCreateInfoKHR rayPipelineInfo = nvvk::make<VkRayTracingPipelineCreateInfoKHR>();
@@ -378,7 +385,7 @@ int main(int argc, const char** argv)
 	/* END COMPUTE SHADER BINDINGS */
 
 	// Create and start recording a command buffer
-	VkCommandBuffer cmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
+	VkCommandBuffer cmdBuffer = Utils::AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
 	
 	// Bind the compute shader pipeline
 	vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rayTracingPipeline);
@@ -388,6 +395,12 @@ int main(int argc, const char** argv)
 	vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, descriptorSetContainer.getPipeLayout(), 0, 1,
 		&descriptorSet, 0, nullptr);
 
+	sbtWrapper.addData(nvvk::SBTWrapper::eHit,
+		0,
+		SBTDiffuseData{
+			GetBufferDeviceAddress(context, boxModel.vertexBuffer.buffer),
+			GetBufferDeviceAddress(context, boxModel.indexBuffer.buffer),
+		});
 
 	sbtWrapper.create(rayTracingPipeline, rayPipelineInfo);
 	auto& regions = sbtWrapper.getRegions();
@@ -413,12 +426,9 @@ int main(int argc, const char** argv)
 	//	0, nullptr, 0, nullptr);                  // No other barriers
 
 	// End and submit the command buffer, then wait for it to finish:
-	EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, cmdBuffer);
+	Utils::EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, cmdBuffer);
 	// TODO: vkQueueSubmit is handled by the OS (much slower than Vulkan)
 	// Ideally we wanna batch submit command buffers
-
-	// Wait for the GPU to finish
-	NVVK_CHECK(vkQueueWaitIdle(context.m_queueGCT));
 	
 	// Get the image data back from the GPU
 	void* data = allocator.map(buffer);
@@ -430,8 +440,10 @@ int main(int argc, const char** argv)
 	vkDestroyPipeline(context, rayTracingPipeline, nullptr);
 	descriptorSetContainer.deinit();
 	raytracingBuilder.destroy();
-	allocator.destroy(vertexBuffer);
-	allocator.destroy(indexBuffer);
+	allocator.destroy(model.vertexBuffer);
+	allocator.destroy(model.indexBuffer);
+	allocator.destroy(boxModel.vertexBuffer);
+	allocator.destroy(boxModel.indexBuffer);
 	vkDestroyCommandPool(context, cmdPool, nullptr);
 	allocator.destroy(buffer);
 	allocator.deinit();
