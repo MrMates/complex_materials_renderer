@@ -1,6 +1,7 @@
 #version 460
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_debug_printf : enable
 
 layout(local_size_x = 16, local_size_y = 8, local_size_z = 1) in;
 
@@ -19,6 +20,25 @@ layout(binding = 3, set = 0, scalar) buffer Indices
 {
   uint indices[];
 };
+layout(binding = 4, set = 0, scalar) buffer MatIDs
+{
+  uint matIds[];
+};
+
+struct Medium
+{
+  vec3 absorption; // sigma a
+  vec3 scattering; // sigma s
+  vec3 anisotropy; // g
+};
+
+// Credit: https://github.com/mitsuba-renderer/mitsuba/blob/10af06f365886c1b6dd8818e0a3841078a62f283/src/medium/materials.h#L34
+// "Apple", { 2.29f, 2.39f, 1.97f }, { 0.0030f, 0.0034f, 0.046f  }, { 0.0f, 0.0f, 0.0f }
+// "Sprite" { 0.00011f, 0.00014f, 0.00014f }, { 0.00189f, 0.00183f, 0.00200f }, { 0.94300f, 0.95300f, 0.95200f }
+Medium appleMedium = Medium(vec3(2.29, 2.39, 1.97), vec3(0.0030, 0.0034, 0.046), vec3(0));
+Medium spriteMedium = Medium(vec3(0.00011, 0.00014, 0.00014), vec3(0.00189, 0.00183, 0.00200), vec3(0.94300, 0.95300, 0.95200));
+// The camera is located at (-0.001, 0, 53).
+const vec3 cameraOrigin = vec3(-0.001, 1.0, 6.0);
 
 // Returns the color of the sky in a given direction (in linear color space)
 vec3 skyColor(vec3 direction)
@@ -42,14 +62,47 @@ struct HitInfo
   uint matID;
 };
 
-HitInfo getObjectHitInfo(rayQueryEXT rayQuery)
+vec3 getTransmittance(float dist)
+{
+  vec3 extinction = spriteMedium.scattering + spriteMedium.absorption; // sigma t
+
+  return exp(dist * -extinction);
+}
+
+// L(x, omega) - radiance, light; here it's the resulting color
+vec3 calculateMediaInteraction(HitInfo hitInfo)
+{
+
+// //   Simplified transmittance for homogeneous media
+//   vec3 transmittance = exp((hitInfo.worldPosition - cameraOrigin) * extinction);
+
+//   if (max(max(transmittance.r, transmittance.g), transmittance.b) < 1e-20) 
+//   {
+//     transmittance = vec3(0);
+//   }
+
+//   vec3 radiance = transmittance; //* appleMedium.scattering; // * 10 /*direct light*/; // TODO: * delta t (interval samplingu)
+
+//   return radiance;
+  return vec3(1);
+}
+
+HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
 {
   HitInfo result;
-  // Get the ID of the triangle
-  const int primitiveID = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, true);
 
-  const uint matID = rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT(rayQuery, true);
-  result.matID = matID;
+  // Get the ID of the triangle
+  int primitiveID;
+  if (commited)
+  {
+    primitiveID = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, true);
+  }
+  else
+  {
+    primitiveID = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, false);
+  }
+
+  result.matID = matIds[primitiveID];
 
   // Get the indices of the vertices of the triangle
   const uint i0 = indices[3 * primitiveID + 0];
@@ -89,6 +142,7 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery)
   result.color = vec3(0.8f);
 
   const float dotX = dot(result.worldNormal, vec3(1.0, 0.0, 0.0));
+  const float dotY = dot(result.worldNormal, vec3(0.0, 1.0, 0.0));
   if(dotX > 0.99)
   {
     result.color = vec3(0.8, 0.0, 0.0);
@@ -117,6 +171,23 @@ float stepAndOutputRNGFloat(inout uint rngState)
   return float(word) / 4294967295.0f;
 }
 
+uint seed = stepRNG(123456);
+float sampleDistance()
+{
+  float rand = stepAndOutputRNGFloat(seed);
+  float sampleDensity = max(max(spriteMedium.scattering.r, spriteMedium.scattering.g), spriteMedium.scattering.b);
+  float sampled = -1.0;
+
+  if (rand < 0.5)
+  {
+    sampled = -log(1-rand) / sampleDensity;
+    // debugPrintfEXT("My float is %f", sampled);
+  }
+
+  return sampled;
+  //TODO: check jestli nejsme pryč z média
+}
+
 void main()
 {
   // The resolution of the buffer, which in this case is a hardcoded vector
@@ -143,8 +214,7 @@ void main()
 
   // This scene uses a right-handed coordinate system like the OBJ file format, where the
   // +x axis points right, the +y axis points up, and the -z axis points into the screen.
-  // The camera is located at (-0.001, 0, 53).
-  const vec3 cameraOrigin = vec3(-0.001, 0.0, 10.0);
+
   // Define the field of view by the vertical slope of the topmost rays:
   const float fovVerticalSlope = 1.0 / 5.0;
 
@@ -185,7 +255,7 @@ void main()
       rayQueryEXT rayQuery;
       rayQueryInitializeEXT(rayQuery,              // Ray query
                             tlas,                  // Top-level acceleration structure
-                            gl_RayFlagsOpaqueEXT,  // Ray flags, here saying "treat all geometry as opaque"
+                            gl_RayFlagsNoneEXT,    // Ray flags
                             0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
                             rayOrigin,             // Ray origin
                             0.0,                   // Minimum t-value
@@ -194,8 +264,28 @@ void main()
 
       // Start traversal, and loop over all ray-scene intersections. When this finishes,
       // rayQuery stores a "committed" intersection, the closest intersection (if any).
+      bool inObject = false;
+      float dist;
+
       while(rayQueryProceedEXT(rayQuery))
       {
+        // Commits the closest hit
+        if(rayQueryGetIntersectionTypeEXT(rayQuery, false) == gl_RayQueryCandidateIntersectionTriangleEXT)
+        {
+          HitInfo hitInfo = getObjectHitInfo(rayQuery, false);
+          if(hitInfo.matID == 1) // Media intersection
+          {
+            dist = sampleDistance();
+            if (dist > 0)
+            {
+              rayQueryGenerateIntersectionEXT(rayQuery, dist);
+            }
+          }
+          else // Commits opaque (non-media) intersections right away
+          {
+            rayQueryConfirmIntersectionEXT(rayQuery);
+          }
+        }
       }
 
       // Get the type of committed (true) intersection - nothing, a triangle, or
@@ -203,14 +293,25 @@ void main()
       if(rayQueryGetIntersectionTypeEXT(rayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
       {
         // Ray hit a triangle
-        HitInfo hitInfo = getObjectHitInfo(rayQuery);
+        HitInfo hitInfo = getObjectHitInfo(rayQuery, true);
 
-        // Apply color absorption
-        accumulatedRayColor *= hitInfo.color;
 
         // Start a new ray at the hit position, but offset it slightly along
         // the normal against rayDirection:
         rayOrigin = hitInfo.worldPosition - 0.0001 * sign(dot(rayDirection, hitInfo.worldNormal)) * hitInfo.worldNormal;
+
+        // if(hitInfo.matID == 1) // Media
+        // {
+        //   accumulatedRayColor *= calculateMediaInteraction(hitInfo);
+        // }
+        // else
+        // {
+        //   // Apply color absorption
+        //   accumulatedRayColor *= hitInfo.color;
+        // }
+
+        accumulatedRayColor *= hitInfo.color;
+
 
         // LAMBERTIAN MODEL
         // For a random diffuse bounce direction, we follow the approach of
@@ -224,9 +325,16 @@ void main()
         // Then normalize the ray direction:
         rayDirection = normalize(rayDirection);
 
+        if(hitInfo.matID == 0)
+        {
+          // light someday hopefully
+        }
         // MIRROR REFLECTION
-        // // Reflect the direction of the ray using the triangle normal:
+        // Reflect the direction of the ray using the triangle normal:
         // rayDirection = reflect(rayDirection, hitInfo.worldNormal);
+      }
+      else if (rayQueryGetIntersectionTypeEXT(rayQuery, true) == gl_RayQueryCommittedIntersectionGeneratedEXT){
+        accumulatedRayColor *= spriteMedium.scattering * getTransmittance(dist);
       }
       else
       {
