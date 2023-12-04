@@ -32,6 +32,12 @@ struct Medium
   vec3 anisotropy; // g
 };
 
+struct RayPayload
+{
+  int depth;
+  float t;
+};
+
 // Credit: https://github.com/mitsuba-renderer/mitsuba/blob/10af06f365886c1b6dd8818e0a3841078a62f283/src/medium/materials.h#L34
 // "Apple", { 2.29f, 2.39f, 1.97f }, { 0.0030f, 0.0034f, 0.046f  }, { 0.0f, 0.0f, 0.0f }
 // "Sprite" { 0.00011f, 0.00014f, 0.00014f }, { 0.00189f, 0.00183f, 0.00200f }, { 0.94300f, 0.95300f, 0.95200f }
@@ -62,6 +68,17 @@ struct HitInfo
   vec3 worldPosition;
   vec3 worldNormal;
   uint matID;
+};
+
+struct MediumSample
+{
+  float t;
+  vec3 point;
+  vec3 absorption;
+  vec3 scattering;
+  float probFail;
+  float probSuccess;
+  vec3 transmittance;
 };
 
 vec3 getTransmittance(float dist)
@@ -179,21 +196,44 @@ float stepAndOutputRNGFloat(inout uint rngState)
   return float(word) / 4294967295.0f;
 }
 
-uint seed = stepRNG(123456);
-float sampleDistance()
+bool sampleDistance(inout MediumSample mSample, float dist, inout uint seed)
 {
   float rand = stepAndOutputRNGFloat(seed);
-  float sampleDensity = max(max(milkMedium.scattering.r, milkMedium.scattering.g), milkMedium.scattering.b);
-  float sampled = -1.0;
+  vec3 extinction = mSample.absorption + mSample.scattering;
+  // Strategy: Single - select the lowest variance channel for density
+  float sampleDensity = min(min(extinction.r, extinction.g), extinction.b);
 
+  float sampled;
+
+  bool success = false;
   if (rand < 0.5)
   {
     sampled = -log(1-rand) / sampleDensity;
     // debugPrintfEXT("My float is %f", sampled);
+    success = true;
   }
 
-  return sampled;
-  //TODO: check jestli nejsme pryč z média
+  if (sampled < dist) // Checking if sampled distance is still in media
+  {
+    mSample.t = sampled; // How deep in the media we are
+  }
+  else
+  {
+    sampled = dist;
+    success = false;
+  }
+
+  mSample.probFail = exp(-sampleDensity * sampled);
+  mSample.probSuccess = sampleDensity * mSample.probFail;
+
+  mSample.transmittance = exp(extinction * (-sampled));
+
+  if (max(max(mSample.transmittance.r, mSample.transmittance.g), mSample.transmittance.b) < 1e-20)
+  {
+    mSample.transmittance = vec3(0);
+  }
+
+  return success;
 }
 
 void main()
@@ -229,6 +269,7 @@ void main()
   // The sum of the colors of all of the samples.
   vec3 summedPixelColor = vec3(0.0);
 
+  int tries = 0;
   // Limit the kernel to trace at most 64 samples.
   const int NUM_SAMPLES = 64;
   for(int sampleIdx = 0; sampleIdx < NUM_SAMPLES; sampleIdx++)
@@ -255,8 +296,10 @@ void main()
 
     vec3 accumulatedRayColor = vec3(1.0);  // The amount of light that made it to the end of the current ray.
 
+    RayPayload payload = {0,0};
+    
     // Limit the kernel to trace at most 32 segments.
-    for(int tracedSegments = 0; tracedSegments < 32; tracedSegments++)
+    while(payload.depth < 32)
     {
       // Trace the ray and see if and where it intersects the scene!
       // First, initialize a ray query object:
@@ -270,49 +313,35 @@ void main()
                             rayDirection,          // Ray direction
                             10000.0);              // Maximum t-value
 
-      // Start traversal, and loop over all ray-scene intersections. When this finishes,
-      // rayQuery stores a "committed" intersection, the closest intersection (if any).
+      bool inMedium = false;
+      vec3 mediumEnter;
+      vec3 mediumExit;
       float dist;
-
       while(rayQueryProceedEXT(rayQuery))
       {
-        // Commits the closest hit
-        if(rayQueryGetIntersectionTypeEXT(rayQuery, false) == gl_RayQueryCandidateIntersectionTriangleEXT)
+        HitInfo info = getObjectHitInfo(rayQuery, false);
+        if (info.matID == 1 && !inMedium) // Enter intersection
         {
-          HitInfo hitInfo = getObjectHitInfo(rayQuery, false);
-          if(hitInfo.matID == 1) // Media intersection
+          inMedium = true;
+          mediumEnter = info.worldPosition;
+          payload.t = rayQueryGetIntersectionTEXT(rayQuery, false);
+        }
+        else if (info.matID == 1 && inMedium) // Exit intersection
+        {
+          inMedium = false;
+          mediumExit = info.worldPosition;
+          dist = distance(mediumEnter, mediumExit);
+          tries++;
+          MediumSample mSample = {0, vec3(0), spriteMedium.absorption, spriteMedium.scattering, 0, 0, vec3(0)};
+          if(sampleDistance(mSample, dist, rngState))
           {
-
-            rayQueryEXT distQuery;
-            rayQueryInitializeEXT(distQuery,              // Ray query
-                            tlas,                  // Top-level acceleration structure
-                            gl_RayFlagsNoneEXT,    // Ray flags
-                            0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
-                            hitInfo.worldPosition,             // Ray origin
-                            0.0,                   // Minimum t-value
-                            rayDirection,          // Ray direction
-                            10000.0);              // Maximum t-value
-
-            while(rayQueryProceedEXT(distQuery))
-            {
-              
-            }
-            if(rayQueryGetIntersectionTypeEXT(distQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
-            {
-              debugPrintfEXT("My float is %f",  rayQueryGetIntersectionTEXT(distQuery, true));
-            }
-
-
-            dist = sampleDistance();
-            if (dist > 0)
-            {
-              rayQueryGenerateIntersectionEXT(rayQuery, dist);
-            }
+            rayQueryGenerateIntersectionEXT(rayQuery, -payload.t + mSample.t);
+            vec3 sampledPoint = mediumEnter + rayDirection*mSample.t;
           }
-          else // Commits opaque (non-media) intersections right away
-          {
-            rayQueryConfirmIntersectionEXT(rayQuery);
-          }
+        }
+        else
+        {
+          rayQueryConfirmIntersectionEXT(rayQuery);
         }
       }
 
@@ -320,6 +349,7 @@ void main()
       // a generated object
       if(rayQueryGetIntersectionTypeEXT(rayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
       {
+        
         // Ray hit a triangle
         HitInfo hitInfo = getObjectHitInfo(rayQuery, true);
 
@@ -352,19 +382,9 @@ void main()
         rayDirection      = hitInfo.worldNormal + vec3(r * cos(theta), r * sin(theta), u);
         // Then normalize the ray direction:
         rayDirection = normalize(rayDirection);
-
-        if(hitInfo.matID == 0)
-        {
-          // light someday hopefully
-        }
-        // MIRROR REFLECTION
-        // Reflect the direction of the ray using the triangle normal:
-        // rayDirection = reflect(rayDirection, hitInfo.worldNormal);
       }
       else if (rayQueryGetIntersectionTypeEXT(rayQuery, true) == gl_RayQueryCommittedIntersectionGeneratedEXT){
-       
-        // debugPrintfEXT("My float is %f",  getTransmittance(dist));
-        accumulatedRayColor *= milkMedium.scattering * getTransmittance(dist);
+        accumulatedRayColor *= spriteMedium.scattering * getTransmittance(dist);
       }
       else
       {
@@ -378,10 +398,12 @@ void main()
     
         break;
       }
+
+      payload.depth++;
     }
   }
 
-  float exposure = 0.00001;
+  float exposure = 1;
   vec3 hdrColor = summedPixelColor / float(NUM_SAMPLES);
 
   //Reinhard toneamp

@@ -187,7 +187,7 @@ int main(int argc, const char** argv)
 
 	// Shader loading and pipeline creation
 	VkShaderModule rayTraceModule =
-		nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.comp.glsl.spv", true, searchPaths));
+		nvvk::createShaderModule(context, nvh::loadFile("shaders/volpath.comp.glsl.spv", true, searchPaths));
 
 	// Describes the entrypoint and the stage to use for this shader module in the pipeline
 	VkPipelineShaderStageCreateInfo shaderStageCreateInfo = nvvk::make<VkPipelineShaderStageCreateInfo>();
