@@ -297,6 +297,8 @@ void main()
     vec3 accumulatedRayColor = vec3(1.0);  // The amount of light that made it to the end of the current ray.
 
     RayPayload payload = {0,0};
+
+    float maxT = 10000.0;
     
     // Limit the kernel to trace at most 32 segments.
     while(payload.depth < 32)
@@ -311,38 +313,80 @@ void main()
                             rayOrigin,             // Ray origin
                             0.0,                   // Minimum t-value
                             rayDirection,          // Ray direction
-                            10000.0);              // Maximum t-value
+                            maxT);              // Maximum t-value
 
       bool inMedium = false;
       vec3 mediumEnter;
       vec3 mediumExit;
       float dist;
+      int pathID = 0;
+      int mediumBounces = 0;
+      vec3 nextPoint;
       while(rayQueryProceedEXT(rayQuery))
       {
         HitInfo info = getObjectHitInfo(rayQuery, false);
-        if (info.matID == 1 && !inMedium) // Enter intersection
-        {
-          inMedium = true;
-          mediumEnter = info.worldPosition;
-          payload.t = rayQueryGetIntersectionTEXT(rayQuery, false);
-        }
-        else if (info.matID == 1 && inMedium) // Exit intersection
-        {
-          inMedium = false;
-          mediumExit = info.worldPosition;
-          dist = distance(mediumEnter, mediumExit);
-          tries++;
-          MediumSample mSample = {0, vec3(0), spriteMedium.absorption, spriteMedium.scattering, 0, 0, vec3(0)};
-          if(sampleDistance(mSample, dist, rngState))
-          {
-            rayQueryGenerateIntersectionEXT(rayQuery, -payload.t + mSample.t);
-            vec3 sampledPoint = mediumEnter + rayDirection*mSample.t;
-          }
-        }
-        else
-        {
+
+        // if (info.matID == 1 && !inMedium) // Enter intersection
+        // {
+        //   inMedium = true;
+
+        //   rayDirection = normalize(rayDirection + vec3(1.0, 0.0, 0.0));
+
+        //   rayQueryEXT rayQueryDist;
+        //   rayQueryInitializeEXT(rayQueryDist,              // Ray query
+        //                               tlas,                  // Top-level acceleration structure
+        //                               gl_RayFlagsTerminateOnFirstHitEXT,    // Ray flags
+        //                               0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
+        //                               info.worldPosition + rayDirection * 0.0001,             // Ray origin
+        //                               0.0,                   // Minimum t-value
+        //                               rayDirection,          // Ray direction
+        //                               10000.0);              // Maximum t-value
+
+        //   rayQueryProceedEXT(rayQueryDist);
+
+        //   HitInfo distInfo = getObjectHitInfo(rayQueryDist, false);
+        //   if (info.matID == 1)
+        //   {
+        //     dist = rayQueryGetIntersectionTEXT(rayQueryDist, false);
+        //     MediumSample mSample = {0, vec3(0), spriteMedium.absorption, spriteMedium.scattering, 0, 0, vec3(0)};
+        //     if(sampleDistance(mSample, dist, rngState))
+        //     {
+        //       mediumBounces++;
+        //     } else
+        //     {
+        //       inMedium = false;
+        //     }
+        //   }
+
+        //   rayQueryInitializeEXT(rayQuery,              // Ray query
+        //                     tlas,                  // Top-level acceleration structure
+        //                     gl_RayFlagsNoneEXT,    // Ray flags
+        //                     0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
+        //                     info.worldPosition + rayDirection * 0.0001,             // Ray origin
+        //                     0.0,                   // Minimum t-value
+        //                     rayDirection,          // Ray direction
+        //                     10000.0);              // Maximum t-value
+        //   inMedium = true;
+        //   mediumEnter = info.worldPosition;
+        //   payload.t = rayQueryGetIntersectionTEXT(rayQuery, false);
+        // }
+        // else if (info.matID == 1 && inMedium) // Exit intersection
+        // {
+        //   inMedium = false;
+        //   mediumExit = info.worldPosition;
+        //   dist = distance(mediumEnter, mediumExit);
+        //   tries++;
+        //   MediumSample mSample = {0, vec3(0), spriteMedium.absorption, spriteMedium.scattering, 0, 0, vec3(0)};
+        //   if(sampleDistance(mSample, dist, rngState))
+        //   {
+        //     rayQueryGenerateIntersectionEXT(rayQuery, -payload.t + mSample.t);
+        //     vec3 sampledPoint = mediumEnter + rayDirection*mSample.t;
+        //   }
+        // }
+        // else
+        // {
           rayQueryConfirmIntersectionEXT(rayQuery);
-        }
+        // }
       }
 
       // Get the type of committed (true) intersection - nothing, a triangle, or
@@ -358,42 +402,115 @@ void main()
         // the normal against rayDirection:
         rayOrigin = hitInfo.worldPosition - 0.0001 * sign(dot(rayDirection, hitInfo.worldNormal)) * hitInfo.worldNormal;
 
-        // if(hitInfo.matID == 1) // Media
-        // {
-        //   accumulatedRayColor *= calculateMediaInteraction(hitInfo);
-        // }
-        // else
-        // {
-        //   // Apply color absorption
-        //   accumulatedRayColor *= hitInfo.color;
-        // }
+        if(hitInfo.matID == 1) // Media
+        {
+          //TODO: Sample from media
+          vec3 newDirection = normalize(rayDirection + vec3(1.0, 0.0, 0.0));
 
-        accumulatedRayColor *= hitInfo.color;
+          // Cast a ray to determine distance to the medium end
+          rayQueryEXT rayQueryDist;
+          rayQueryInitializeEXT(rayQueryDist,              // Ray query
+                                      tlas,                  // Top-level acceleration structure
+                                      gl_RayFlagsTerminateOnFirstHitEXT,    // Ray flags
+                                      0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
+                                      hitInfo.worldPosition + newDirection * 0.0001,             // Ray origin
+                                      0.0,                   // Minimum t-value
+                                      newDirection,          // Ray direction
+                                      10000.0);              // Maximum t-value
 
+          rayQueryProceedEXT(rayQueryDist);
 
-        // LAMBERTIAN MODEL
-        // For a random diffuse bounce direction, we follow the approach of
-        // Ray Tracing in One Weekend, and generate a random point on a sphere
-        // of radius 1 centered at the normal. This uses the random_unit_vector
-        // function from chapter 8.5:
-        const float theta = 6.2831853 * stepAndOutputRNGFloat(rngState);   // Random in [0, 2pi]
-        const float u     = 2.0 * stepAndOutputRNGFloat(rngState) - 1.0;  // Random in [-1, 1]
-        const float r     = sqrt(1.0 - u * u);
-        rayDirection      = hitInfo.worldNormal + vec3(r * cos(theta), r * sin(theta), u);
-        // Then normalize the ray direction:
-        rayDirection = normalize(rayDirection);
+          HitInfo distInfo = getObjectHitInfo(rayQueryDist, false);
+
+          // If we hit a medium, that's the end of it
+          if (distInfo.matID == 1)
+          {
+            dist = rayQueryGetIntersectionTEXT(rayQueryDist, false);
+            MediumSample mSample = {0, vec3(0), spriteMedium.absorption, spriteMedium.scattering, 0, 0, vec3(0)};
+            if(sampleDistance(mSample, dist, rngState))
+            {
+              rayDirection = newDirection;
+              maxT = mSample.t;
+              inMedium = true;
+              nextPoint = hitInfo.worldPosition + rayDirection * mSample.t;
+            } else
+            {
+              inMedium = false;
+              maxT = 10000.0;
+            }
+          }
+        }
+        else
+        {
+          inMedium = false;
+          // Apply color absorption
+          accumulatedRayColor *= hitInfo.color;
+          // LAMBERTIAN MODEL
+          // For a random diffuse bounce direction, we follow the approach of
+          // Ray Tracing in One Weekend, and generate a random point on a sphere
+          // of radius 1 centered at the normal. This uses the random_unit_vector
+          // function from chapter 8.5:
+          const float theta = 6.2831853 * stepAndOutputRNGFloat(rngState);   // Random in [0, 2pi]
+          const float u     = 2.0 * stepAndOutputRNGFloat(rngState) - 1.0;  // Random in [-1, 1]
+          const float r     = sqrt(1.0 - u * u);
+          rayDirection      = hitInfo.worldNormal + vec3(r * cos(theta), r * sin(theta), u);
+          // Then normalize the ray direction:
+          rayDirection = normalize(rayDirection);
+          maxT = 10000.0;
+        }
       }
-      else if (rayQueryGetIntersectionTypeEXT(rayQuery, true) == gl_RayQueryCommittedIntersectionGeneratedEXT){
-        accumulatedRayColor *= spriteMedium.scattering * getTransmittance(dist);
+      else if ((rayQueryGetIntersectionTypeEXT(rayQuery, false) == gl_RayQueryCommittedIntersectionNoneEXT) && inMedium)
+      {
+          rayOrigin = nextPoint;
+          //TODO: Sample from media
+          vec3 newDirection = normalize(rayDirection);
+
+          // Cast a ray to determine distance to the medium end
+          rayQueryEXT rayQueryDist;
+          rayQueryInitializeEXT(rayQueryDist,              // Ray query
+                                      tlas,                  // Top-level acceleration structure
+                                      gl_RayFlagsTerminateOnFirstHitEXT,    // Ray flags
+                                      0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
+                                      nextPoint + newDirection * 0.0001,             // Ray origin
+                                      0.0,                   // Minimum t-value
+                                      newDirection,          // Ray direction
+                                      10000.0);              // Maximum t-value
+
+          rayQueryProceedEXT(rayQueryDist);
+
+          HitInfo distInfo = getObjectHitInfo(rayQueryDist, false);
+
+          // If we hit a medium, that's the end of it
+          if (distInfo.matID == 1)
+          {
+            dist = rayQueryGetIntersectionTEXT(rayQueryDist, false);
+            MediumSample mSample = {0, vec3(0), spriteMedium.absorption, spriteMedium.scattering, 0, 0, vec3(0)};
+            if(sampleDistance(mSample, dist, rngState))
+            {
+              rayDirection = newDirection;
+              maxT = mSample.t;
+              inMedium = true;
+              // accumulatedRayColor *= vec3(0.8);
+            } else
+            {
+              inMedium = false;
+              maxT = 10000.0;
+            }
+          }
       }
       else
       {
+        if(pixel.x == 800 && pixel.y == 600)
+        {
+          debugPrintfEXT("No intersection\n");
+        }
         // Ray hit the sky
         accumulatedRayColor *= skyColor(rayDirection);
         
         // Sum this with the pixel's other samples.
         // (Note that we treat a ray that didn't find a light source as if it had
         // an accumulated color of (0, 0, 0)).
+
         summedPixelColor += accumulatedRayColor;
     
         break;
