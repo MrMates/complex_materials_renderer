@@ -3,6 +3,10 @@
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_debug_printf : enable
 
+const float INV_FOURPI = 0.07957747154594767;
+const float PI = 3.14159265359;
+const float TWOPI = 6.28318530718;
+
 layout(local_size_x = 16, local_size_y = 8, local_size_z = 1) in;
 
 // The scalar layout qualifier here means to align types according to the alignment
@@ -42,24 +46,25 @@ struct RayPayload
 // "Apple", { 2.29f, 2.39f, 1.97f }, { 0.0030f, 0.0034f, 0.046f  }, { 0.0f, 0.0f, 0.0f }
 // "Sprite" { 0.00011f, 0.00014f, 0.00014f }, { 0.00189f, 0.00183f, 0.00200f }, { 0.94300f, 0.95300f, 0.95200f }
 // "Regular Milk",                { 18.2052f, 20.3826f, 22.3698f }, { 0.00153f, 0.00460f, 0.01993f }, { 0.75000f, 0.71400f, 0.68100f }
-// "Ketchup",                    { 0.18f, 0.07f, 0.03f }, { 0.061f,  0.97f,   1.45f   }, { 0.0f, 0.0f, 0.0f }, 1.3f },
+// "Ketchup",                    { 0.18f, 0.07f, 0.03f }, { 0.061f,  0.97f,   1.45f   }, { 0.0f, 0.0f, 0.0f }},
 Medium appleMedium = Medium(vec3(2.29, 2.39, 1.97), vec3(0.0030, 0.0034, 0.046), vec3(0));
 Medium spriteMedium = Medium(vec3(0.00011, 0.00014, 0.00014), vec3(0.00189, 0.00183, 0.00200), vec3(0.94300, 0.95300, 0.95200));
-Medium milkMedium = Medium(vec3(18.2052, 20.3826, 22.3698), vec3(0.00153, 0.00460, 0.01993), vec3(0.94300, 0.95300, 0.95200));
+Medium milkMedium = Medium(vec3(18.2052, 20.3826, 22.3698), vec3(0.00153, 0.00460, 0.01993), vec3(0.75000, 0.71400, 0.68100));
 Medium ketchupMedium = Medium(vec3(0.18, 0.07, 0.03), vec3(0.061, 0.97, 1.45), vec3(0));
 // The camera is located at (-0.001, 0, 53).
 
-Medium selectedMedium = milkMedium;
+Medium selectedMedium = ketchupMedium;
 
 const vec3 cameraOrigin = vec3(-0.001, 1.0, 6.0);
 
 // Returns the color of the sky in a given direction (in linear color space)
 vec3 skyColor(vec3 direction)
 {
+  return vec3(1.0f, 0.7f, 0.3f);
   // +y in world space is up, so:
   if(direction.y > 0.0f)
   {
-    return mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
+    return mix(vec3(1.0f), vec3(1.0f, 0.5f, 0.1f), direction.y);
   }
   else
   {
@@ -166,11 +171,11 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
 
   const float dotX = dot(result.worldNormal, vec3(1.0, 0.0, 0.0));
   const float dotY = dot(result.worldNormal, vec3(0.0, 1.0, 0.0));
-  if(dotX > 0.99)
+  if(matIds[primitiveID] != 1 && dotX > 0.99)
   {
     result.color = vec3(0.8, 0.0, 0.0);
   }
-  else if(dotX < -0.99)
+  else if(matIds[primitiveID] != 1 && dotX < -0.99)
   {
     result.color = vec3(0.0, 0.8, 0.0);
   }
@@ -194,6 +199,60 @@ float stepAndOutputRNGFloat(inout uint rngState)
   return float(word) / 4294967295.0f;
 }
 
+struct PhaseFunctionSample {
+  vec3 inDir;
+  vec3 outDir;
+};
+
+// Implementation of the Henyey-Greenstein phase function via Mitsuba
+// Credit: https://github.com/mitsuba-renderer/mitsuba/blob/master/src/phase/hg.cpp
+float evalPhaseFunction(PhaseFunctionSample phase)
+{
+  // Using the average of the three channels from g
+  float g = dot(selectedMedium.anisotropy, vec3(1.0f)) / 3.0f;
+
+  float tmp = 1.0f + g * g + 2.0f * g * dot(phase.inDir, phase.outDir);
+  return INV_FOURPI * (1.0f - g * g) / (tmp * sqrt(tmp));
+}
+
+float samplePhaseFunction(inout PhaseFunctionSample phase, inout uint seed)
+{
+  float g = dot(selectedMedium.anisotropy, vec3(1.0f)) / 3.0f;
+
+  float x = stepAndOutputRNGFloat(seed);
+  float y = stepAndOutputRNGFloat(seed);
+
+  float temp = (1.0f - g * g) / (1.0f - g + 2.0f * g * x);
+  float cosTheta = (1.0f + g * g - temp * temp) / (2.0f * g);
+
+  float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+  float phi = TWOPI * y;
+  float sinPhi = sin(phi);
+  float cosPhi = cos(phi);
+
+  vec3 localDir = vec3(sinTheta * cosPhi, sinTheta * sinPhi, cosTheta);
+
+  vec3 s,t;
+
+  // Using incident direction vector as normal for coordinate system
+  vec3 normal = -phase.inDir;
+  if (abs(normal.x) > abs(normal.y)) {
+    float temp = 1.0f / sqrt(normal.x * normal.x + normal.z * normal.z);
+    t = vec3(normal.z * temp, 0.0f, -normal.x * temp);
+  } else {
+    float temp = 1.0f / sqrt(normal.y * normal.y + normal.z * normal.z);
+    t = vec3(0.0f, normal.z * temp, -normal.y * temp);
+  }
+  s = cross(t, normal);
+
+  // Converting localDir to world space
+  vec3 worldDir = s * localDir.x + t * localDir.y + normal * localDir.z;
+  phase.outDir = worldDir;
+
+  return 1.0f;
+}
+
+
 bool sampleDistance(inout MediumSample mSample, float dist, inout uint seed)
 {
   float rand = stepAndOutputRNGFloat(seed);
@@ -203,13 +262,18 @@ bool sampleDistance(inout MediumSample mSample, float dist, inout uint seed)
 
   float sampled;
 
-  bool success = false;
   if (rand < 0.5)
   {
+    rand /= 0.5;
     sampled = -log(1-rand) / sampleDensity;
     // debugPrintfEXT("My float is %f", sampled);
-    success = true;
   }
+  else
+  {
+    sampled = 1.0 / 0.0; // +inf (infinite distance, no interaction)
+  }
+
+  bool success = true;
 
   if (sampled < dist) // Checking if sampled distance is still in media
   {
@@ -431,7 +495,9 @@ void main()
               rayDirection = newDirection;
               maxT = mSample.t;
               inMedium = true;
+              //TODO: nextPoint or rayOrigin?
               nextPoint = nextPoint + rayDirection * mSample.t;
+              rayOrigin = nextPoint;
               accumulatedRayColor *= selectedMedium.scattering * mSample.transmittance / mSample.probSuccess;
             } else
             {
