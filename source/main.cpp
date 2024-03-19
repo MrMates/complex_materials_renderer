@@ -24,8 +24,8 @@
 static const uint64_t render_width = 1920;
 static const uint64_t render_height = 1080;
 
-static const uint64_t workgroup_width = 16;
-static const uint64_t workgroup_height = 8;
+static const uint64_t workgroup_width = 32;
+static const uint64_t workgroup_height = 32;
 
 
 int main(int argc, const char** argv)
