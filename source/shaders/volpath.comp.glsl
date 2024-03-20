@@ -215,23 +215,27 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState)
                         lightDir,          // Ray direction
                         lightDist);              // Maximum t-value
 
+  float prevT = 0.0;
   while(rayQueryProceedEXT(lightRayQuery))
   {
-    rayQueryConfirmIntersectionEXT(lightRayQuery);
-  }
-
-  if(rayQueryGetIntersectionTypeEXT(lightRayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
-  {
-    HitInfo hitInfo = getObjectHitInfo(lightRayQuery, true);
-
-    if (hitInfo.matID != 1) // not medium
+    if(rayQueryGetIntersectionTypeEXT(lightRayQuery, false) == gl_RayQueryCommittedIntersectionTriangleEXT)
     {
-      transmittance = vec3(0); // light is fully occluded
-    }
+      HitInfo hitInfo = getObjectHitInfo(lightRayQuery, false);
 
-    // TODO: Sample distance only to the end of media (if it's needed)
-    vec3 mediumTransmittance = evalTransmittance(lightDist);
-    transmittance *= mediumTransmittance;
+      if (hitInfo.matID != 1) // not medium
+      {
+        transmittance = vec3(0); // light is fully occluded
+        break;
+      }
+
+      float dist = rayQueryGetIntersectionTEXT(lightRayQuery, false);
+      if (prevT > 0.0)
+      {
+        vec3 mediumTransmittance = evalTransmittance(dist - prevT);
+        transmittance *= mediumTransmittance;
+      }
+      prevT = dist;
+    }
   }
 
   lightValue *= transmittance;
@@ -379,7 +383,7 @@ void main()
   vec3 summedPixelColor = vec3(0.0);
 
   // Limit the kernel to trace at most 64 samples.
-  const int NUM_SAMPLES = 512;
+  const int NUM_SAMPLES = 128;
   for(int sampleIdx = 0; sampleIdx < NUM_SAMPLES; sampleIdx++)
   {
     // Starts at camera
@@ -481,39 +485,17 @@ void main()
         {
           if (hitInfo.matID == 1)
           {
+            // We're either out of media or RNG failed the sampling, so we just apply the transmittance 
+            // and continue tracing behind the media
             throughput *= mSample.transmittance / mSample.probFail;
 
-            // Need to trace what's behind the medium
-            rayQueryEXT rayQueryDist;
-            rayQueryInitializeEXT(rayQueryDist,              // Ray query
-                                    tlas,                  // Top-level acceleration structure
-                                    gl_RayFlagsNoneEXT,    // Ray flags
-                                    0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
-                                    hitInfo.worldPosition + dist*rayDirection + rayDirection * 0.0002,             // Ray origin
-                                    0.0,                   // Minimum t-value
-                                    rayDirection,          // Ray direction
-                                    10000.0);              // Maximum t-value
-
-            while(rayQueryProceedEXT(rayQueryDist))
-            {
-              rayQueryConfirmIntersectionEXT(rayQueryDist);
-            }
-
-            if(rayQueryGetIntersectionTypeEXT(rayQueryDist, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
-            {
-              HitInfo backgroundHitInfo = getObjectHitInfo(rayQueryDist, true);
-              if (backgroundHitInfo.matID != 1)
-              {
-                throughput *= backgroundHitInfo.color;
-              }
-              // We want to set the origin to the same point as rayQueryDist to repeat the same query in the next iteration
-              // That way we can even handle the whole media interaction for the next segment
-              rayOrigin = hitInfo.worldPosition + dist*rayDirection + rayDirection * 0.0002;
-            }
+            // Hit position + unscattered direction + small offset so we don't hit the same media again
+            rayOrigin = hitInfo.worldPosition + dist*rayDirection + rayDirection * 0.0002;
             payload.depth++;
             continue;
           }
 
+          // Shaded/lambertian section
           vec3 colorValue = vec3(1.0);
           if (hitInfo.matID != 1)
           {
@@ -531,7 +513,7 @@ void main()
           rayDirection      = hitInfo.worldNormal + vec3(r * cos(theta), r * sin(theta), u);
           // Then normalize the ray direction:
           rayDirection = normalize(rayDirection);
-          rayOrigin = hitInfo.worldPosition + rayDirection * dist;
+          rayOrigin = hitInfo.worldPosition + hitInfo.worldNormal * 0.0001;
         }
       }
       payload.depth++;
