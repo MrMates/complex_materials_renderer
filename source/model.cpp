@@ -7,18 +7,24 @@ Model::Model(tinyobj::ObjReader reader,
 {
 	objVertices = reader.GetAttrib().GetVertices();
 	const std::vector<tinyobj::shape_t>& objShapes = reader.GetShapes();  // All shapes in the file
-	assert(objShapes.size() == 1);                                          // Check that this file has only one shape
-	const tinyobj::shape_t& objShape = objShapes[0];                        // Get the first shape
 
-	// Get the indices of the vertices of the first mesh of `objShape` in `attrib.vertices`:
-	objIndices.reserve(objShape.mesh.indices.size());
-	for (const tinyobj::index_t& index : objShape.mesh.indices)
+	for (size_t s = 0; s < objShapes.size(); s++)
 	{
-		objIndices.push_back(index.vertex_index);
+		const tinyobj::shape_t& objShape = objShapes[s];                        // Get the first shape
+
+		// Get the indices of the vertices of the first mesh of `objShape` in `attrib.vertices`:
+		objIndices.reserve(objIndices.size() + objShape.mesh.indices.size());
+		for (const tinyobj::index_t& index : objShape.mesh.indices)
+		{
+			objIndices.push_back(index.vertex_index);
+		}
+
+		objMaterials.reserve(objMaterials.size() + objShape.mesh.material_ids.size());
+		for (const int& id : objShape.mesh.material_ids)
+		{
+			objMaterials.push_back(id);
+		}
 	}
-
-	objMaterials = objShape.mesh.material_ids;
-
 	// Start a command buffer for uploading the buffers
 	VkCommandBuffer uploadCmdBuffer = Utils::AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
 	// We get these buffers' device addresses, and use them as storage buffers and build inputs.

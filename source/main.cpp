@@ -93,7 +93,7 @@ int main(int argc, const char** argv)
 	tinyobj::ObjReader       reader;  // Used to read an OBJ file
 	tinyobj::ObjReaderConfig readerConfig;
 	readerConfig.mtl_search_path = searchPaths[0];
-	reader.ParseFromFile(nvh::findFile("resources/scenes/test_scene_back.obj", searchPaths));
+	reader.ParseFromFile(nvh::findFile("resources/scenes/test_scene_separate.obj", searchPaths));
 	assert(reader.Valid());  // Make sure tinyobj was able to parse this file
 
 	Model cornellBoxModel{ reader, allocator, context, cmdPool };
