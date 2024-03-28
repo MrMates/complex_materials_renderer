@@ -7,6 +7,7 @@
 #include <nvvk/structs_vk.hpp>
 #include <nvvk/resourceallocator_vk.hpp>
 #include <nvvk/error_vk.hpp>
+#include <nvvk/images_vk.hpp>
 #include <nvvk/shaders_vk.hpp>
 #include <nvvk/descriptorsets_vk.hpp>
 #include <nvvk/raytraceKHR_vk.hpp>
@@ -15,6 +16,8 @@
 #include "model.hpp"
 #include "utils.hpp"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 #define TINYOBJLOADER_IMPLEMENTATION
@@ -62,23 +65,37 @@ int main(int argc, const char** argv)
 	nvvk::ResourceAllocatorDedicated allocator;
 	allocator.init(context, context.m_physicalDevice);
 
-	// Create a buffer
-	// TODO: currently a 3-channel 32-bit floating point image
-	// Later it would be better to use 4-channel (for transparency) 16-bit (faster, space-efficient) images
+	// Image for the GPU
+	VkImageCreateInfo imageCreateInfo = nvvk::make<VkImageCreateInfo>();
+	imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageCreateInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT; // has to be RGBA because of GPU optimizations
+	imageCreateInfo.extent = { render_width, render_height, 1 };
+	imageCreateInfo.mipLevels = 1;
+	imageCreateInfo.arrayLayers = 1;
+	imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageCreateInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	nvvk::Image image = allocator.createImage(imageCreateInfo);
 
-	VkDeviceSize bufferSizeBytes = render_width * render_height * 3 * sizeof(float);
-	VkBufferCreateInfo bufferCreateInfo = nvvk::make<VkBufferCreateInfo>();
-	bufferCreateInfo.size = bufferSizeBytes;
-	bufferCreateInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-	// VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT means that the CPU can read this buffer's memory.
-	// VK_MEMORY_PROPERTY_HOST_CACHED_BIT means that the CPU caches this memory.
-	// VK_MEMORY_PROPERTY_HOST_COHERENT_BIT means that the CPU side of cache management
-	// is handled automatically, with potentially slower reads/writes.
-	nvvk::Buffer buffer = allocator.createBuffer(bufferCreateInfo,                         //
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT       //
-		| VK_MEMORY_PROPERTY_HOST_CACHED_BIT  //
-		| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+	VkImageViewCreateInfo imageViewCreateInfo = nvvk::make<VkImageViewCreateInfo>();
+	imageViewCreateInfo.image = image.image;
+	imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	imageViewCreateInfo.format = imageCreateInfo.format;
+	imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+	imageViewCreateInfo.subresourceRange.layerCount = 1;
+	imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+	imageViewCreateInfo.subresourceRange.levelCount = 1;
+	VkImageView imageView;
+	NVVK_CHECK(vkCreateImageView(context, &imageViewCreateInfo, nullptr, &imageView));
 
+	// GPU output image counterpart for the CPU (to copy to)
+	imageCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
+	imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	nvvk::Image imageLinear = allocator.createImage(imageCreateInfo,
+		VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
 
 	// Create the command pool
 	VkCommandPoolCreateInfo cmdPoolInfo = nvvk::make<VkCommandPoolCreateInfo>();
@@ -98,6 +115,30 @@ int main(int argc, const char** argv)
 
 	Model cornellBoxModel{ reader, allocator, context, cmdPool };
 
+	VkCommandBuffer imageCmdBuffer = Utils::AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
+	const VkAccessFlags srcAccesses = 0; // Images don't have a layout (not accessible)
+	const VkAccessFlags dstImageAccesses = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	const VkAccessFlags dstImageLinearAccesses = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+	const VkPipelineStageFlags srcStages = nvvk::makeAccessMaskPipelineStageFlags(srcAccesses);
+	const VkPipelineStageFlags dstStages = nvvk::makeAccessMaskPipelineStageFlags(dstImageAccesses | dstImageLinearAccesses);
+
+	VkImageMemoryBarrier imageBarriers[2];
+
+	imageBarriers[0] = nvvk::makeImageMemoryBarrier(image.image,
+		srcAccesses, dstImageAccesses,
+		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+		VK_IMAGE_ASPECT_COLOR_BIT);
+
+	imageBarriers[1] = nvvk::makeImageMemoryBarrier(imageLinear.image,
+		srcAccesses, dstImageLinearAccesses,
+		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		VK_IMAGE_ASPECT_COLOR_BIT);
+
+	vkCmdPipelineBarrier(imageCmdBuffer, srcStages, dstStages, 0, 0, nullptr, 0, nullptr, 2, imageBarriers);
+	Utils::EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, imageCmdBuffer);
+	allocator.finalizeAndReleaseStaging();
+
 	// Describe the bottom-level acceleration structure (BLAS)
 	std::vector<nvvk::RaytracingBuilderKHR::BlasInput> blases;
 
@@ -105,9 +146,6 @@ int main(int argc, const char** argv)
 	// Create the BLAS
 	nvvk::RaytracingBuilderKHR raytracingBuilder;
 	raytracingBuilder.setup(context, &allocator, context.m_queueGCT);
-	// TODO: If BLAS changes needs updates each frame (not static) this should be implemented differently
-	// because nvvk::RaytracingBuilderKHR::buildBlas makes CPU wait for the GPU to build the BLAS.
-	// Also, if the geometry is static or updated rarely, it's worth to use compaction to save memory.
 	raytracingBuilder.buildBlas(blases, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
 
 
@@ -131,14 +169,21 @@ int main(int argc, const char** argv)
 	
 	raytracingBuilder.buildTlas(instances, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
 
+	int texWidth, texHeight, texChannels;
+
+	const std::string filename = nvh::findFile("resources/scenes/uploads_files_877823_3D_files_textures/textures/1.jpg", searchPaths);
+	stbi_uc* pixels = stbi_load(filename.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+	assert(pixels);
+
+
 	// Here's the list of bindings for the descriptor set layout, from raytrace.comp.glsl:
-	// 0 - a storage buffer (the buffer `buffer`)
+	// 0 - a storage image (the image `image`)
 	// 1 - an acceleration structure (the TLAS)
 	// 2 - storage buffer (for vertex buffer)
 	// 3 - storage buffer (for index buffer)
 	// 4 - storage buffer (for material ID buffer)
 	nvvk::DescriptorSetContainer descriptorSetContainer(context);
-	descriptorSetContainer.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+	descriptorSetContainer.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 	descriptorSetContainer.addBinding(1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 	descriptorSetContainer.addBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 	descriptorSetContainer.addBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
@@ -154,10 +199,10 @@ int main(int argc, const char** argv)
 	// Write values into the descriptor set.
 	std::array<VkWriteDescriptorSet, 5> writeDescriptorSets;
 	// 0
-	VkDescriptorBufferInfo descriptorBufferInfo{};
-	descriptorBufferInfo.buffer = buffer.buffer;    // The VkBuffer object
-	descriptorBufferInfo.range = bufferSizeBytes;  // The length of memory to bind; offset is 0.
-	writeDescriptorSets[0] = descriptorSetContainer.makeWrite(0 /*set index*/, 0 /*binding*/, &descriptorBufferInfo);
+	VkDescriptorImageInfo descriptorImageInfo{};
+	descriptorImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	descriptorImageInfo.imageView = imageView;
+	writeDescriptorSets[0] = descriptorSetContainer.makeWrite(0, 0, &descriptorImageInfo);
 	// 1
 	VkWriteDescriptorSetAccelerationStructureKHR descriptorAS = nvvk::make<VkWriteDescriptorSetAccelerationStructureKHR>();
 	VkAccelerationStructureKHR tlasCopy = raytracingBuilder.getAccelerationStructure();  // So that we can take its address
@@ -223,14 +268,46 @@ int main(int argc, const char** argv)
 	vkCmdDispatch(cmdBuffer, (uint32_t(render_width) + workgroup_width - 1) / workgroup_width,
 		(uint32_t(render_height) + workgroup_height - 1) / workgroup_height, 1);
 
+	{
+		// We need to change the GPU image layout so it can be read by transfer (copy to the CPU)
+		const VkAccessFlags srcAccesses = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		const VkAccessFlags dstAccesses = VK_ACCESS_TRANSFER_READ_BIT;
+		const VkPipelineStageFlags srcStages = nvvk::makeAccessMaskPipelineStageFlags(srcAccesses);
+		const VkPipelineStageFlags dstStages = nvvk::makeAccessMaskPipelineStageFlags(dstAccesses);
+
+		const VkImageMemoryBarrier barrier =
+			nvvk::makeImageMemoryBarrier(image.image,
+				srcAccesses, dstAccesses,
+				VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+				VK_IMAGE_ASPECT_COLOR_BIT);
+		vkCmdPipelineBarrier(cmdBuffer, srcStages, dstStages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+	}
+
+	// Copy the GPU image to CPU
+	VkImageCopy region;
+	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.srcSubresource.baseArrayLayer = 0;
+	region.srcSubresource.layerCount = 1;
+	region.srcSubresource.mipLevel = 0;
+
+	region.srcOffset = { 0,0,0 };
+	region.dstSubresource = region.srcSubresource;
+	region.dstOffset = { 0,0,0 };
+
+	region.extent = { render_width, render_height, 1 };
+	vkCmdCopyImage(cmdBuffer,
+		image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		imageLinear.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1, &region);
+
 	// Add a command that says "Make it so that memory writes by the vkCmdFillBuffer call
 	// are available to read from the CPU." (In other words, "Flush the GPU caches
 	// so the CPU can read the data.") To do this, we use a memory barrier.
 	VkMemoryBarrier memoryBarrier = nvvk::make<VkMemoryBarrier>();
-	memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;	 // Make shader writes
+	memoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;	 // Make transfer writes
 	memoryBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;       // Readable by the CPU
 	vkCmdPipelineBarrier(cmdBuffer,                              // The command buffer
-		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,     // From the transfer stage
+		VK_PIPELINE_STAGE_TRANSFER_BIT,			  // From transfers
 		VK_PIPELINE_STAGE_HOST_BIT,               // To the CPU
 		0,                                        // No special flags
 		1, &memoryBarrier,                        // An array of memory barriers
@@ -238,17 +315,15 @@ int main(int argc, const char** argv)
 
 	// End and submit the command buffer, then wait for it to finish:
 	Utils::EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, cmdBuffer);
-	// TODO: vkQueueSubmit is handled by the OS (much slower than Vulkan)
-	// Ideally we wanna batch submit command buffers
 
 	// Wait for the GPU to finish
 	NVVK_CHECK(vkQueueWaitIdle(context.m_queueGCT));
 
 
 	// Get the image data back from the GPU
-	void* data = allocator.map(buffer);
-	stbi_write_hdr("out.hdr", render_width, render_height, 3, reinterpret_cast<float*>(data));
-	allocator.unmap(buffer);
+	void* data = allocator.map(imageLinear);
+	stbi_write_hdr("out.hdr", render_width, render_height, 4, reinterpret_cast<float*>(data));
+	allocator.unmap(imageLinear);
 
 
 	vkDestroyPipeline(context, computePipeline, nullptr);
@@ -259,7 +334,9 @@ int main(int argc, const char** argv)
 	allocator.destroy(cornellBoxModel.indexBuffer);
 	allocator.destroy(cornellBoxModel.materialIdBuffer);
 	vkDestroyCommandPool(context, cmdPool, nullptr);
-	allocator.destroy(buffer);
+	allocator.destroy(imageLinear);
+	vkDestroyImageView(context, imageView, nullptr);
+	allocator.destroy(image);
 	allocator.deinit();
 	context.deinit();                    // Don't forget to clean up at the end of the program!
 }
