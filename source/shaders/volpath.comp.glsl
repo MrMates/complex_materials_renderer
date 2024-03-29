@@ -59,25 +59,11 @@ Medium chardonnay = Medium(vec3(0.00021, 0.00033, 0.00048), vec3(0.01078, 0.0118
 Medium selectedMedium = spriteMedium;
 
 float airIOR = 1.00;
-float mediaIOR = 1.55;
+float mediaIOR = 1.33;
 vec3 reflectance = vec3(0.9);
 
-// Returns the color of the sky in a given direction (in linear color space)
-vec3 skyColor(vec3 direction)
-{
-  // +y in world space is up, so:
-  if(direction.y > 0.0f)
-  {
-    return mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
-  }
-  else
-  {
-    return vec3(0.03f);
-  }
-}
-
-// The camera is located at (-0.001, 1.0, 6.0).
-const vec3 cameraOrigin = vec3(-0.001, 1.0, 6.0);
+// The camera location in world space
+const vec3 cameraOrigin = vec3(-0.001, 1.5, 6.0);
 
 const vec3 lightPos = vec3(-1.001, 2.0, 6.0);
 const vec3 lightColor = vec3(0.8, 0.8, 0.8);
@@ -94,7 +80,6 @@ struct HitInfo
 struct MediumSample
 {
   float t;
-  vec3 point;
   vec3 absorption;
   vec3 scattering;
   float probFail;
@@ -167,7 +152,7 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
   {
     objectToWorldInverse = rayQueryGetIntersectionWorldToObjectEXT(rayQuery, false);
   }
-  // For the main tutorial, object space is the same as world space:
+  // Object space is the same as world space in this implementation
   result.worldNormal = normalize((objectNormal * objectToWorldInverse).xyz);
 
   result.color = vec3(0.8f);
@@ -188,21 +173,6 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
   }
 
   return result;
-}
-
-// viz. RayTracingGems
-vec3 offsetRay(vec3 point, vec3 normal)
-{
-  ivec3 of_i = ivec3(offset_int_scale * normal.x, offset_int_scale * normal.y, offset_int_scale * normal.z);
-
-  vec3 p_i = vec3(
-                float(int(point.x) + ((point.x < 0.0) ? -of_i.x : of_i.x)),
-                float(int(point.y) + ((point.y < 0.0) ? -of_i.y : of_i.y)),
-                float(int(point.z) + ((point.z < 0.0) ? -of_i.z : of_i.z)));
-
-  return vec3(abs(point.x) < offset_origin ? point.x+offset_float_scale*normal.x : p_i.x,
-              abs(point.y) < offset_origin ? point.y+offset_float_scale*normal.y : p_i.y,
-              abs(point.z) < offset_origin ? point.z+offset_float_scale*normal.z : p_i.z);
 }
 
 // Random number generation using pcg32i_random_t, using inc = 1. Our random state is a uint.
@@ -286,8 +256,15 @@ vec3 diffuseSample(vec3 wi, inout vec3 wo, inout uint rngState)
   return reflectance;
 }
 
-float getFresnelR(float n1, float n2, vec3 inDir, vec3 normal)
+float getFresnelR(float n1, float n2, vec3 inDir, vec3 normal, bool fast)
 {
+  if (fast) {
+    // Schlick's approximation
+    float f = ((1.0 - n1 / n2)*(1.0 - n1 / n2)) / ((1.0 + n1 / n2)*(1.0 + n1 / n2));
+    return f + (1.0 - f) * pow(1.0 - abs(dot(normalize(inDir), normalize(normal))), 5.0);
+  }
+
+  // Full Fresnel
   float theta1 = acos(dot(normalize(inDir), normalize(normal)));
   if (dot(inDir, normal) < 0.0) {
     theta1 = PI - theta1;
@@ -312,18 +289,23 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState)
 
   vec3 lightValue = lightIntensity * invDist * invDist;
 
+  // Shadow smoothing
+  lightDir.x += 0.05 * (stepAndOutputRNGFloat(rngState) - 0.5);
+  lightDir.y += 0.05 * (stepAndOutputRNGFloat(rngState) - 0.5);
+  lightDir.z += 0.05 * (stepAndOutputRNGFloat(rngState) - 0.5);
+
   lightDir = normalize(lightDir);
   vec3 transmittance = vec3(1.0);
 
   rayQueryEXT lightRayQuery;
-  rayQueryInitializeEXT(lightRayQuery,              // Ray query
-                        tlas,                  // Top-level acceleration structure
-                        gl_RayFlagsNoneEXT,    // Ray flags
-                        0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
-                        point,             // Ray origin
-                        0.0001,                   // Minimum t-value
-                        lightDir,          // Ray direction
-                        lightDist);              // Maximum t-value
+  rayQueryInitializeEXT(lightRayQuery,
+                        tlas,
+                        gl_RayFlagsNoneEXT,
+                        0xFF,
+                        point + normal * 0.0001,
+                        0.0000,
+                        lightDir,
+                        lightDist);
 
   while(rayQueryProceedEXT(lightRayQuery))
   {
@@ -343,14 +325,14 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState)
     lightDist -= rayQueryGetIntersectionTEXT(lightRayQuery, true);
 
     rayQueryEXT distRayQuery;
-    rayQueryInitializeEXT(distRayQuery,              // Ray query
-                          tlas,                  // Top-level acceleration structure
-                          gl_RayFlagsNoneEXT,    // Ray flags
-                          0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
-                          hitInfo.worldPosition,             // Ray origin
-                          0.0001,                   // Minimum t-value
-                          lightDir,          // Ray direction
-                          lightDist);              // Maximum t-value
+    rayQueryInitializeEXT(distRayQuery,
+                          tlas,
+                          gl_RayFlagsNoneEXT,
+                          0xFF,
+                          hitInfo.worldPosition,
+                          0.0001,
+                          lightDir,
+                          lightDist);
 
     while(rayQueryProceedEXT(distRayQuery))
     {
@@ -366,6 +348,7 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState)
         return vec3(0.0);
       }
       vec3 mediumTransmittance = evalTransmittance(rayQueryGetIntersectionTEXT(distRayQuery, true));
+      transmittance *= vec3(0.7);
       transmittance *= mediumTransmittance;
     }
   }
@@ -492,17 +475,15 @@ bool sampleDistance(inout MediumSample mSample, float dist, inout uint seed)
 
 void main()
 {
-  // The resolution of the image
   const ivec2 resolution = imageSize(storageImage);
 
   const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 
-  // If the pixel is outside of the image, don't do anything:
   if((pixel.x >= resolution.x) || (pixel.y >= resolution.y))
   {
     return;
   }
-  // State of the random number generator.
+
   uint rngState = uint(resolution.x * pixel.y + pixel.x);  // Initial seed
 
   // This scene uses a right-handed coordinate system like the OBJ file format, where the
@@ -512,11 +493,9 @@ void main()
   const float fovVerticalSlope = 1.0 / 5.0;
   vec3 summedPixelColor = vec3(0.0);
 
-  // Limit the kernel to trace at most 64 samples.
   const int NUM_SAMPLES = 512;
   for(int sampleIdx = 0; sampleIdx < NUM_SAMPLES; sampleIdx++)
   {
-    // Starts at camera
     vec3 rayOrigin = cameraOrigin;
 
     // Randomly sample a point on the pixel
@@ -525,7 +504,7 @@ void main()
     // Convert the pixel coordinates to screen coordinates:
     const vec2 screenUV          = vec2((2.0 * randomPixelCenter.x - resolution.x) / resolution.y,    //
                                -(2.0 * randomPixelCenter.y - resolution.y) / resolution.y);  // Flip the y axis
-    // Create a ray direction:
+
     vec3 rayDirection = vec3(fovVerticalSlope * screenUV.x, fovVerticalSlope * screenUV.y, -1.0);
     rayDirection      = normalize(rayDirection);
 
@@ -534,25 +513,20 @@ void main()
 
     RayPayload payload = {0,0};
 
-    float maxT = 10000.0;
-    bool inMedium = false;
-    vec3 nextPoint;
     uint prevMatID = 0;
 
     // Limit the kernel to trace at most 32 segments.
     while(payload.depth < 32)
     {
-      // Trace the ray and see if and where it intersects the scene!
-      // First, initialize a ray query object:
       rayQueryEXT rayQuery;
       rayQueryInitializeEXT(rayQuery,              // Ray query
                             tlas,                  // Top-level acceleration structure
                             gl_RayFlagsNoneEXT,    // Ray flags
                             0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
                             rayOrigin,             // Ray origin
-                            0.0,                   // Minimum t-value
+                            0.0001,                   // Minimum t-value
                             rayDirection,          // Ray direction
-                            maxT);              // Maximum t-value
+                            10000.0);              // Maximum t-value
 
 
       float dist;
@@ -564,9 +538,7 @@ void main()
       // Get the type of committed (true) intersection
       if(rayQueryGetIntersectionTypeEXT(rayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
       {
-        // Ray hit a triangle
         HitInfo hitInfo = getObjectHitInfo(rayQuery, true);
-        
 
         if((hitInfo.matID == 1) && (prevMatID != 1)) 
         { // entering medium
@@ -575,23 +547,22 @@ void main()
           vec3 refractDir = refract(rayDirection, hitInfo.worldNormal, airIOR / mediaIOR);
           vec3 reflectDir = reflect(rayDirection, hitInfo.worldNormal);
 
-          float fresnelR = getFresnelR(airIOR, mediaIOR, rayDirection, hitInfo.worldNormal);
+          float fresnelR = getFresnelR(airIOR, mediaIOR, rayDirection, hitInfo.worldNormal, false);
           float rand = stepAndOutputRNGFloat(rngState);
 
           if (rand < fresnelR)
           {
             // Reflect
             rayDirection = reflectDir;
-            // rayOrigin = hitInfo.worldPosition + hitInfo.worldNormal * 0.0001;
-            // accumulatedRayColor += vec3(0.9);
-            // payload.depth++;
-            // continue;
+            rayOrigin = hitInfo.worldPosition + hitInfo.worldNormal * 0.0001;
+            // accumulatedRayColor += vec3(0.9); - TODO?: specular color?
+            payload.depth++;
+            continue;
           }
           else
           {
             // Refract
             rayDirection = refractDir;
-            // rayOrigin = hitInfo.worldPosition + hitInfo.worldNormal * (dot(rayDirection, hitInfo.worldNormal) < 0 ? -0.0001 : 0.0001);
           }
 
         }
@@ -600,20 +571,20 @@ void main()
 
         // Cast a ray to determine distance to the medium end
         rayQueryEXT rayQueryDist;
-        rayQueryInitializeEXT(rayQueryDist,              // Ray query
-                                    tlas,                  // Top-level acceleration structure
-                                    gl_RayFlagsTerminateOnFirstHitEXT,    // Ray flags
-                                    0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
-                                    hitInfo.worldPosition,// + newDirection * 0.0001,             // Ray origin
-                                    0.0001,                   // Minimum t-value
-                                    newDirection,          // Ray direction
-                                    10000.0);              // Maximum t-value
+        rayQueryInitializeEXT(rayQueryDist,
+                                    tlas,
+                                    gl_RayFlagsTerminateOnFirstHitEXT,
+                                    0xFF,
+                                    hitInfo.worldPosition,
+                                    0.0001,
+                                    newDirection,
+                                    10000.0);
 
         rayQueryProceedEXT(rayQueryDist);
 
         dist = rayQueryGetIntersectionTEXT(rayQueryDist, false);
         HitInfo mediumEndHitInfo = getObjectHitInfo(rayQueryDist, false);
-        MediumSample mSample = {0, vec3(0), selectedMedium.absorption, selectedMedium.scattering, 0, 0, vec3(0)};
+        MediumSample mSample = {0, selectedMedium.absorption, selectedMedium.scattering, 0, 0, vec3(0)};
         if(hitInfo.matID == 1 && sampleDistance(mSample, dist, rngState))
         {
           prevMatID = 1;
@@ -657,7 +628,7 @@ void main()
             vec3 refractDir = refract(rayDirection, hitInfo.worldNormal, mediaIOR / airIOR);
             vec3 reflectDir = reflect(rayDirection, hitInfo.worldNormal);
 
-            float fresnelR = getFresnelR(mediaIOR, airIOR, rayDirection, hitInfo.worldNormal);
+            float fresnelR = getFresnelR(mediaIOR, airIOR, rayDirection, hitInfo.worldNormal, false);
             float rand = stepAndOutputRNGFloat(rngState);
 
             if (rand < fresnelR)
@@ -670,13 +641,18 @@ void main()
               // Refract
               rayDirection = refractDir;
             }
-            rayOrigin += rayDirection * 0.0001; //TODO: Proper offset
             payload.depth++;
             continue;
           }
 
           // Shaded/lambertian section
           vec3 wo;
+
+          if(dot(rayDirection, hitInfo.worldNormal) > 0)
+          {
+            rayDirection = -rayDirection;
+          }
+
           vec3 bsdfVal = diffuseSample(-rayDirection, wo, rngState);
           if(bsdfVal == vec3(0.0))
           {
@@ -689,7 +665,7 @@ void main()
           accumulatedRayColor += throughput * lightValue * diffuseEval(-rayDirection, wo) * hitInfo.color;
 
           rayDirection = normalize(wo);
-          rayOrigin = offsetRay(hitInfo.worldPosition, hitInfo.worldNormal);
+          rayOrigin = hitInfo.worldPosition + hitInfo.worldNormal * 0.0001;
         }
       }
       else
@@ -714,7 +690,7 @@ void main()
   }
 
 
-  float exposure = 1;
+  float exposure = 1.0;
   vec3 hdrColor = summedPixelColor / float(NUM_SAMPLES);
 
   //Reinhard toneamp
