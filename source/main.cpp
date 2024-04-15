@@ -2,6 +2,7 @@
 #include <array>
 #include <iostream>
 #include <random>
+#include <string>
 
 #include <nvvk/context_vk.hpp>
 #include <nvvk/structs_vk.hpp>
@@ -110,10 +111,11 @@ int main(int argc, const char** argv)
 	tinyobj::ObjReader       reader;  // Used to read an OBJ file
 	tinyobj::ObjReaderConfig readerConfig;
 	readerConfig.mtl_search_path = searchPaths[0];
-	reader.ParseFromFile(nvh::findFile("resources/scenes/shader_ball.obj", searchPaths));
+	std::string objFilePath("resources/scenes/shader_ball.obj");
+	reader.ParseFromFile(nvh::findFile(objFilePath, searchPaths));
 	assert(reader.Valid());  // Make sure tinyobj was able to parse this file
 
-	Model cornellBoxModel{ reader, allocator, context, cmdPool };
+	Model cornellBoxModel{ reader, allocator, context, cmdPool, nvh::findFile(objFilePath, searchPaths) };
 
 	VkCommandBuffer imageCmdBuffer = Utils::AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
 	const VkAccessFlags srcAccesses = 0; // Images don't have a layout (not accessible)
@@ -182,12 +184,14 @@ int main(int argc, const char** argv)
 	// 2 - storage buffer (for vertex buffer)
 	// 3 - storage buffer (for index buffer)
 	// 4 - storage buffer (for material ID buffer)
+	// 5 - storage buffer (for media definitions)
 	nvvk::DescriptorSetContainer descriptorSetContainer(context);
 	descriptorSetContainer.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 	descriptorSetContainer.addBinding(1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 	descriptorSetContainer.addBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 	descriptorSetContainer.addBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 	descriptorSetContainer.addBinding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+	descriptorSetContainer.addBinding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 
 	// Create a layout from the list of bindings
 	descriptorSetContainer.initLayout();
@@ -197,7 +201,7 @@ int main(int argc, const char** argv)
 	descriptorSetContainer.initPipeLayout();
 
 	// Write values into the descriptor set.
-	std::array<VkWriteDescriptorSet, 5> writeDescriptorSets;
+	std::array<VkWriteDescriptorSet, 6> writeDescriptorSets;
 	// 0
 	VkDescriptorImageInfo descriptorImageInfo{};
 	descriptorImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -224,6 +228,11 @@ int main(int argc, const char** argv)
 	materialDescriptorBufferInfo.buffer = cornellBoxModel.materialIdBuffer.buffer;
 	materialDescriptorBufferInfo.range = VK_WHOLE_SIZE;
 	writeDescriptorSets[4] = descriptorSetContainer.makeWrite(0, 4, &materialDescriptorBufferInfo);
+	// 5
+	VkDescriptorBufferInfo mediaDescriptorBufferInfo{};
+	mediaDescriptorBufferInfo.buffer = cornellBoxModel.mediaDefinitionsBuffer.buffer;
+	mediaDescriptorBufferInfo.range = VK_WHOLE_SIZE;
+	writeDescriptorSets[5] = descriptorSetContainer.makeWrite(0, 5, &mediaDescriptorBufferInfo);
 
 	vkUpdateDescriptorSets(context,                                            // The context
 		static_cast<uint32_t>(writeDescriptorSets.size()),  // Number of VkWriteDescriptorSet objects

@@ -14,6 +14,14 @@ const float offset_int_scale = 256.0;
 
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
+struct MediumBuffer
+{
+  float matID;
+  vec3 scattering; // sigma s
+  vec3 absorption; // sigma a
+  vec3 anisotropy; // g
+};
+
 layout(binding = 0, set = 0, rgba32f) uniform image2D storageImage;
 layout(binding = 1, set = 0) uniform accelerationStructureEXT tlas;
 // The scalar layout qualifier here means to align types according to the alignment
@@ -30,6 +38,11 @@ layout(binding = 4, set = 0, scalar) buffer MatIDs
 {
   uint matIds[];
 };
+layout(binding = 5, set = 0, scalar) buffer Media
+{
+  float mediaSize;
+  MediumBuffer media[];
+};
 
 struct Medium
 {
@@ -43,6 +56,8 @@ struct RayPayload
   int depth;
   float t;
 };
+
+Medium none = Medium(vec3(0), vec3(0), vec3(0));
 
 // Credit: https://github.com/mitsuba-renderer/mitsuba/blob/10af06f365886c1b6dd8818e0a3841078a62f283/src/medium/materials.h#L34
 // "Apple", { 2.29f, 2.39f, 1.97f }, { 0.0030f, 0.0034f, 0.046f  }, { 0.0f, 0.0f, 0.0f }
@@ -75,6 +90,8 @@ struct HitInfo
   vec3 worldPosition;
   vec3 worldNormal;
   uint matID;
+  bool hasMedium;
+  Medium medium;
 };
 
 struct MediumSample
@@ -103,6 +120,17 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
   }
 
   result.matID = matIds[primitiveID];
+
+  result.hasMedium = false;
+  for (int i = 0; i < uint(mediaSize); i++)
+  {
+    if (result.matID == uint(media[i].matID))
+    {
+      result.medium = Medium(media[i].scattering, media[i].absorption, media[i].anisotropy);
+      result.hasMedium = true;
+      break;
+    }
+  }
 
   // Get the indices of the vertices of the triangle
   const uint i0 = indices[3 * primitiveID + 0];
@@ -192,9 +220,9 @@ float stepAndOutputRNGFloat(inout uint rngState)
 }
 bool shown = false;
 
-vec3 evalTransmittance(float dist)
+vec3 evalTransmittance(float dist, Medium medium)
 {
-  vec3 extinction = selectedMedium.absorption + selectedMedium.scattering;
+  vec3 extinction = medium.absorption + medium.scattering;
   vec3 transmittance = exp(extinction * (-dist));
   return transmittance;
 }
@@ -281,7 +309,7 @@ float getFresnelR(float n1, float n2, vec3 inDir, vec3 normal, bool fast)
   return (rs * rs + rp * rp) / 2.0;
 }
 
-vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState)
+vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState, Medium medium)
 {
   vec3 lightDir = lightPos - point;
   float lightDist = length(lightDir);
@@ -342,12 +370,12 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState)
     if(rayQueryGetIntersectionTypeEXT(distRayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
     {
       HitInfo mediumHitInfo = getObjectHitInfo(distRayQuery, true);
-      if (mediumHitInfo.matID != 1)
+      if (!mediumHitInfo.hasMedium)
       {
         // light is fully occluded
         return vec3(0.0);
       }
-      vec3 mediumTransmittance = evalTransmittance(rayQueryGetIntersectionTEXT(distRayQuery, true));
+      vec3 mediumTransmittance = evalTransmittance(rayQueryGetIntersectionTEXT(distRayQuery, true), mediumHitInfo.medium);
       transmittance *= vec3(0.7);
       transmittance *= mediumTransmittance;
     }
@@ -364,18 +392,18 @@ struct PhaseFunctionSample {
 
 // Implementation of the Henyey-Greenstein phase function via Mitsuba
 // Credit: https://github.com/mitsuba-renderer/mitsuba/blob/master/src/phase/hg.cpp
-float evalPhaseFunction(PhaseFunctionSample phase)
+float evalPhaseFunction(PhaseFunctionSample phase, Medium medium)
 {
   // Using the average of the three channels from g
-  float g = dot(selectedMedium.anisotropy, vec3(1.0f)) / 3.0f;
+  float g = dot(medium.anisotropy, vec3(1.0f)) / 3.0f;
 
   float tmp = 1.0f + g * g + 2.0f * g * dot(phase.inDir, phase.outDir);
   return INV_FOURPI * (1.0f - g * g) / (tmp * sqrt(tmp));
 }
 
-float samplePhaseFunction(inout PhaseFunctionSample phase, inout uint seed)
+float samplePhaseFunction(inout PhaseFunctionSample phase, Medium medium, inout uint seed)
 {
-  float g = dot(selectedMedium.anisotropy, vec3(1.0f)) / 3.0f;
+  float g = dot(medium.anisotropy, vec3(1.0f)) / 3.0f;
 
   float x = stepAndOutputRNGFloat(seed);
   float y = stepAndOutputRNGFloat(seed);
@@ -475,6 +503,8 @@ bool sampleDistance(inout MediumSample mSample, float dist, inout uint seed)
 
 void main()
 {
+  // debugPrintfEXT("Size: %d; Mat %d: %f, %f, %f\n", uint(mediaSize), uint(media[0].matID), media[0].scattering.r, media[0].scattering.g, media[0].scattering.b);
+
   const ivec2 resolution = imageSize(storageImage);
 
   const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -540,9 +570,9 @@ void main()
       {
         HitInfo hitInfo = getObjectHitInfo(rayQuery, true);
 
-        if((hitInfo.matID == 1) && (prevMatID != 1)) 
+        if((hitInfo.hasMedium) && (prevMatID != hitInfo.matID)) 
         { // entering medium
-          prevMatID = 1;
+          prevMatID = hitInfo.matID;
 
           vec3 refractDir = refract(rayDirection, hitInfo.worldNormal, airIOR / mediaIOR);
           vec3 reflectDir = reflect(rayDirection, hitInfo.worldNormal);
@@ -584,21 +614,27 @@ void main()
 
         dist = rayQueryGetIntersectionTEXT(rayQueryDist, false);
         HitInfo mediumEndHitInfo = getObjectHitInfo(rayQueryDist, false);
-        MediumSample mSample = {0, selectedMedium.absorption, selectedMedium.scattering, 0, 0, vec3(0)};
-        if(hitInfo.matID == 1 && sampleDistance(mSample, dist, rngState))
+
+        MediumSample mSample = {0, hitInfo.medium.absorption, hitInfo.medium.scattering, 0, 0, vec3(0)};
+        if (hitInfo.hasMedium)
         {
-          prevMatID = 1;
+          mSample.absorption = hitInfo.medium.absorption;
+          mSample.scattering = hitInfo.medium.scattering;
+        }
+        if(hitInfo.hasMedium && sampleDistance(mSample, dist, rngState))
+        {
+          prevMatID = hitInfo.matID;
           throughput *= mSample.scattering * mSample.transmittance / mSample.probSuccess;
 
 
           // Direct light
-          vec3 lightValue = sampleDirectLight(hitInfo.worldPosition, hitInfo.worldNormal, rngState);
+          vec3 lightValue = sampleDirectLight(hitInfo.worldPosition, hitInfo.worldNormal, rngState, hitInfo.medium);
           PhaseFunctionSample phase = {-rayDirection, vec3(0)};
-          float phaseEval = evalPhaseFunction(phase);
+          float phaseEval = evalPhaseFunction(phase, hitInfo.medium);
           accumulatedRayColor += throughput * lightValue * phaseEval;
 
           // Sample phase function
-          float phaseVal = samplePhaseFunction(phase, rngState);
+          float phaseVal = samplePhaseFunction(phase, hitInfo.medium, rngState);
           if (phaseVal < 1e-20)
           {
             break;
@@ -614,7 +650,7 @@ void main()
         else
         {
           prevMatID = hitInfo.matID;
-          if (hitInfo.matID == 1)
+          if (hitInfo.hasMedium)
           {
             // We're either out of media or RNG failed the sampling, so we just apply the transmittance 
             // and continue tracing behind the media
@@ -660,7 +696,7 @@ void main()
           }
 
           throughput *= bsdfVal;
-          vec3 lightValue = sampleDirectLight(hitInfo.worldPosition, hitInfo.worldNormal, rngState);
+          vec3 lightValue = sampleDirectLight(hitInfo.worldPosition, hitInfo.worldNormal, rngState, hitInfo.medium);
 
           accumulatedRayColor += throughput * lightValue * diffuseEval(-rayDirection, wo) * hitInfo.color;
 

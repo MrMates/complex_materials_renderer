@@ -1,5 +1,4 @@
 cmake_build
 *.spv
-/resources/scenes/stanford-dragon-pbr
-/resources/scenes/stanford-dragon-pbr.zip
-/resources/scenes
+/resources/scenes/*
+!/resources/scenes/mat_parser.py

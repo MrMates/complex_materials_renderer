@@ -1,9 +1,15 @@
 #include "model.hpp"
+#include "json.hpp"
+using json = nlohmann::ordered_json;
+
+#include <fstream>
+#include <iostream>
 
 Model::Model(tinyobj::ObjReader reader,
 	nvvk::ResourceAllocatorDedicated& allocator,
 	nvvk::Context& context,
-	VkCommandPool& cmdPool)
+	VkCommandPool& cmdPool,
+	std::string filepath)
 {
 	objVertices = reader.GetAttrib().GetVertices();
 	const std::vector<tinyobj::shape_t>& objShapes = reader.GetShapes();  // All shapes in the file
@@ -25,6 +31,38 @@ Model::Model(tinyobj::ObjReader reader,
 			objMaterials.push_back(id);
 		}
 	}
+
+	std::string jsonFileName = filepath.substr(0, filepath.find_last_of('.')).append(".json");
+	std::ifstream f(jsonFileName);
+	assert(f.is_open() && "Media definition .json file not found. Run mat_parser.py for this .obj scene first.");
+	auto data = nlohmann::ordered_json::parse(f);
+
+	// Buffer in format count, (id, vec3(sigma_s), vec3(sigma_a), vec3(g))*count
+	mediaDefinitions.push_back(data.size());
+	for (auto it = data.begin(); it != data.end(); ++it)
+	{
+		mediaDefinitions.push_back(std::stof(it.key()));
+		auto& sigmaS = it.value()["sigma_s"];
+		for (size_t i = 0; i < 3; i++)
+		{
+			mediaDefinitions.push_back(std::stof(sigmaS[i].dump()));
+		}
+
+		auto& sigmaA = it.value()["sigma_a"];
+		for (size_t i = 0; i < 3; i++)
+		{
+			mediaDefinitions.push_back(std::stof(sigmaA[i].dump()));
+		}
+
+		auto& g = it.value()["g"];
+		for (size_t i = 0; i < 3; i++)
+		{
+			mediaDefinitions.push_back(std::stof(g[i].dump()));
+		}
+	}
+
+	f.close();
+
 	// Start a command buffer for uploading the buffers
 	VkCommandBuffer uploadCmdBuffer = Utils::AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
 	// We get these buffers' device addresses, and use them as storage buffers and build inputs.
@@ -33,6 +71,7 @@ Model::Model(tinyobj::ObjReader reader,
 	vertexBuffer = allocator.createBuffer(uploadCmdBuffer, objVertices, usage);
 	indexBuffer = allocator.createBuffer(uploadCmdBuffer, objIndices, usage);
 	materialIdBuffer = allocator.createBuffer(uploadCmdBuffer, objMaterials, usage);
+	mediaDefinitionsBuffer = allocator.createBuffer(uploadCmdBuffer, mediaDefinitions, usage);
 	Utils::EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, uploadCmdBuffer);
 	allocator.finalizeAndReleaseStaging();
 }
