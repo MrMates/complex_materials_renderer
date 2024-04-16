@@ -64,7 +64,7 @@ float mediaIOR = 1.33;
 vec3 reflectance = vec3(0.9);
 
 // The camera location in world space
-const vec3 cameraOrigin = vec3(-0.001, 1.5, 6.0);
+const vec3 cameraOrigin = vec3(-0.001, 1.5, 8.0);
 
 const vec3 lightPos = vec3(-1.001, 2.0, 6.0);
 const vec3 lightColor = vec3(0.8, 0.8, 0.8);
@@ -509,7 +509,7 @@ void main()
   const float fovVerticalSlope = 1.0 / 5.0;
   vec3 summedPixelColor = vec3(0.0);
 
-  const int NUM_SAMPLES = 512;
+  const int NUM_SAMPLES = 128;
   for(int sampleIdx = 0; sampleIdx < NUM_SAMPLES; sampleIdx++)
   {
     vec3 rayOrigin = cameraOrigin;

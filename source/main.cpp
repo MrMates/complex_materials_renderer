@@ -111,7 +111,11 @@ int main(int argc, const char** argv)
 	tinyobj::ObjReader       reader;  // Used to read an OBJ file
 	tinyobj::ObjReaderConfig readerConfig;
 	readerConfig.mtl_search_path = searchPaths[0];
-	std::string objFilePath("resources/scenes/shader_ball.obj");
+	std::string objFilePath("resources/scenes/test_scene_back.obj");
+	if (argc == 2)
+	{
+		objFilePath = argv[1];
+	}
 	reader.ParseFromFile(nvh::findFile(objFilePath, searchPaths));
 	assert(reader.Valid());  // Make sure tinyobj was able to parse this file
 
@@ -170,13 +174,6 @@ int main(int argc, const char** argv)
 	}
 	
 	raytracingBuilder.buildTlas(instances, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
-
-	int texWidth, texHeight, texChannels;
-
-	const std::string filename = nvh::findFile("resources/scenes/uploads_files_877823_3D_files_textures/textures/1.jpg", searchPaths);
-	stbi_uc* pixels = stbi_load(filename.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-	assert(pixels);
-
 
 	// Here's the list of bindings for the descriptor set layout, from raytrace.comp.glsl:
 	// 0 - a storage image (the image `image`)
