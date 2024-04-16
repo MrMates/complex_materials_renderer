@@ -59,20 +59,6 @@ struct RayPayload
 
 Medium none = Medium(vec3(0), vec3(0), vec3(0));
 
-// Credit: https://github.com/mitsuba-renderer/mitsuba/blob/10af06f365886c1b6dd8818e0a3841078a62f283/src/medium/materials.h#L34
-// "Apple", { 2.29f, 2.39f, 1.97f }, { 0.0030f, 0.0034f, 0.046f  }, { 0.0f, 0.0f, 0.0f }
-// "Sprite" { 0.00011f, 0.00014f, 0.00014f }, { 0.00189f, 0.00183f, 0.00200f }, { 0.94300f, 0.95300f, 0.95200f }
-// "Regular Milk",                { 18.2052f, 20.3826f, 22.3698f }, { 0.00153f, 0.00460f, 0.01993f }, { 0.75000f, 0.71400f, 0.68100f }
-// "Ketchup",                    { 0.18f, 0.07f, 0.03f }, { 0.061f,  0.97f,   1.45f   }, { 0.0f, 0.0f, 0.0f }},
-Medium appleMedium = Medium(vec3(2.29, 2.39, 1.97), vec3(0.0030, 0.0034, 0.046), vec3(0));
-Medium spriteMedium = Medium(vec3(0.00011, 0.00014, 0.00014), vec3(0.00189, 0.00183, 0.00200), vec3(0.94300, 0.95300, 0.95200));
-Medium milkMedium = Medium(vec3(18.2052, 20.3826, 22.3698), vec3(0.00153, 0.00460, 0.01993), vec3(0.75000, 0.71400, 0.68100));
-Medium ketchupMedium = Medium(vec3(0.18, 0.07, 0.03), vec3(0.061, 0.97, 1.45), vec3(0));
-Medium presso = Medium(vec3(7.78262, 8.13050, 8.53875), vec3(4.79838, 6.57512, 8.84925), vec3(0.90700, 0.89600, 0.88000));
-Medium chardonnay = Medium(vec3(0.00021, 0.00033, 0.00048), vec3(0.01078, 0.01186, 0.02400), vec3(0.91400, 0.95800, 0.97500));
-
-Medium selectedMedium = spriteMedium;
-
 float airIOR = 1.00;
 float mediaIOR = 1.33;
 vec3 reflectance = vec3(0.9);
