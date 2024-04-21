@@ -634,10 +634,7 @@ void main()
           PhaseFunctionSample phase = {-rayDirection, vec3(0)};
           float phaseEval = evalPhaseFunction(phase, hitInfo.medium);
 
-          // If we want, we can add to the color right here and then add it to the samples
-          // Instead of waiting for the end of the path
-          // This can speed up rendering and convergence, but the colors will be a bit different
-          // accumulatedRayColor += throughput * lightValue * phaseEval;
+          accumulatedRayColor += throughput * lightValue * phaseEval;
 
           // Sample phase function
           float phaseVal = samplePhaseFunction(phase, hitInfo.medium, rngState);
