@@ -111,7 +111,7 @@ int main(int argc, const char** argv)
 	tinyobj::ObjReader       reader;  // Used to read an OBJ file
 	tinyobj::ObjReaderConfig readerConfig;
 	readerConfig.mtl_search_path = searchPaths[0];
-	std::string objFilePath("resources/scenes/test_scene_back.obj");
+	std::string objFilePath("resources/scenes/studio_corner.obj");
 	if (argc == 2)
 	{
 		objFilePath = argv[1];
@@ -339,6 +339,7 @@ int main(int argc, const char** argv)
 	allocator.destroy(cornellBoxModel.vertexBuffer);
 	allocator.destroy(cornellBoxModel.indexBuffer);
 	allocator.destroy(cornellBoxModel.materialIdBuffer);
+	allocator.destroy(cornellBoxModel.mediaDefinitionsBuffer);
 	vkDestroyCommandPool(context, cmdPool, nullptr);
 	allocator.destroy(imageLinear);
 	vkDestroyImageView(context, imageView, nullptr);

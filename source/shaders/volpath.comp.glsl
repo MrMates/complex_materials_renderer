@@ -8,10 +8,6 @@ const float PI = 3.14159265359;
 const float INV_PI = 0.31830988618;
 const float TWOPI = 6.28318530718;
 
-const float offset_origin = 1.0 / 32.0;
-const float offset_float_scale = 1.0 / 65536.0;
-const float offset_int_scale = 256.0;
-
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
 struct MediumBuffer
@@ -60,15 +56,15 @@ struct RayPayload
 Medium none = Medium(vec3(0), vec3(0), vec3(0));
 
 float airIOR = 1.00;
-float mediaIOR = 1.33;
-vec3 reflectance = vec3(0.9);
+float mediaIOR = 1.55;
+vec3 reflectance = vec3(0.8);
 
 // The camera location in world space
-const vec3 cameraOrigin = vec3(-0.001, 1.5, 8.0);
+const vec3 cameraOrigin = vec3(3.2, 4.2, 6.5);
 
-const vec3 lightPos = vec3(-1.001, 2.0, 6.0);
-const vec3 lightColor = vec3(0.8, 0.8, 0.8);
-const vec3 lightIntensity = lightColor * 500.0;
+const vec3 lightPos = vec3(2.001, 5.0, 6.0);
+const vec3 lightColor = vec3(0.8, 0.8, 0.6);
+const vec3 lightIntensity = lightColor * 100.0;
 
 struct HitInfo
 {
@@ -171,19 +167,27 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
 
   result.color = vec3(0.8f);
 
+  // Checkerboard pattern
+  // if((  int(floor(result.worldPosition.x)) % 2 == 0 && int(floor(result.worldPosition.y)) % 2 == 0) 
+  //   || (int(floor(result.worldPosition.x)) % 2 != 0 && int(floor(result.worldPosition.y)) % 2 != 0))
+  // {
+  //   result.color = vec3(0.8f, 0.8f, 0.8f);
+  // }
+  // else
+  // {
+  //   result.color = vec3(0.3f, 0.3f, 0.3f);
+  // }
+
+  // Cornell sides
   const float dotX = dot(result.worldNormal, vec3(1.0, 0.0, 0.0));
   const float dotY = dot(result.worldNormal, vec3(0.0, 1.0, 0.0));
-  if(matIds[primitiveID] == 2 && dotX > 0.99)
+  if(dotX > 0.99)
   {
     result.color = vec3(0.8, 0.0, 0.0);
   }
-  else if(matIds[primitiveID] == 2 && dotX < -0.99)
+  else if(dotX < -0.99)
   {
     result.color = vec3(0.0, 0.8, 0.0);
-  }
-  else if (matIds[primitiveID] == 0)
-  {
-    result.color = vec3(0.2, 0.2, 0.2);
   }
 
   return result;
@@ -316,8 +320,8 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState, Medium medi
                         tlas,
                         gl_RayFlagsNoneEXT,
                         0xFF,
-                        point + normal * 0.0001,
-                        0.0000,
+                        point,
+                        0.0001,
                         lightDir,
                         lightDist);
 
@@ -330,7 +334,7 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState, Medium medi
   {
     HitInfo hitInfo = getObjectHitInfo(lightRayQuery, true);
 
-    if (hitInfo.matID != 1) // not medium
+    if (!hitInfo.hasMedium) // not medium
     {
       // light is fully occluded
       return vec3(0.0);
@@ -456,7 +460,7 @@ bool sampleDistance(inout MediumSample mSample, float dist, inout uint seed)
   }
   else
   {
-    sampled = 1.0 / 0.0; // +inf (infinite distance, no interaction)
+    sampled = 500000; // no interaction
   }
 
   bool success = true;
@@ -468,6 +472,7 @@ bool sampleDistance(inout MediumSample mSample, float dist, inout uint seed)
   else
   {
     sampled = dist;
+    mSample.t = dist;
     success = false;
   }
 
@@ -479,7 +484,7 @@ bool sampleDistance(inout MediumSample mSample, float dist, inout uint seed)
   mSample.probSuccess *= sampleWeight;
   mSample.probFail = sampleWeight * mSample.probFail + (1 - sampleWeight);
 
-  if (max(max(mSample.transmittance.r, mSample.transmittance.g), mSample.transmittance.b) < 1e-20)
+  if (max(max(mSample.transmittance.r, mSample.transmittance.g), mSample.transmittance.b) < 0.0001)
   {
     mSample.transmittance = vec3(0);
   }
@@ -509,7 +514,7 @@ void main()
   const float fovVerticalSlope = 1.0 / 5.0;
   vec3 summedPixelColor = vec3(0.0);
 
-  const int NUM_SAMPLES = 128;
+  const int NUM_SAMPLES = 512;
   for(int sampleIdx = 0; sampleIdx < NUM_SAMPLES; sampleIdx++)
   {
     vec3 rayOrigin = cameraOrigin;
@@ -529,10 +534,8 @@ void main()
 
     RayPayload payload = {0,0};
 
-    uint prevMatID = 0;
-
     // Limit the kernel to trace at most 32 segments.
-    while(payload.depth < 32)
+    while(payload.depth < 128)
     {
       rayQueryEXT rayQuery;
       rayQueryInitializeEXT(rayQuery,              // Ray query
@@ -540,7 +543,7 @@ void main()
                             gl_RayFlagsNoneEXT,    // Ray flags
                             0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
                             rayOrigin,             // Ray origin
-                            0.0001,                   // Minimum t-value
+                            0.0003,                   // Minimum t-value
                             rayDirection,          // Ray direction
                             10000.0);              // Maximum t-value
 
@@ -556,29 +559,43 @@ void main()
       {
         HitInfo hitInfo = getObjectHitInfo(rayQuery, true);
 
-        if((hitInfo.hasMedium) && (prevMatID != hitInfo.matID)) 
-        { // entering medium
-          prevMatID = hitInfo.matID;
+        if(hitInfo.hasMedium)
+        {
+          vec3 interactionNormal = hitInfo.worldNormal;
+          float fromIOR = airIOR;
+          float toIOR = mediaIOR;
+          if (dot(rayDirection, hitInfo.worldNormal) > 0)
+          {
+            interactionNormal = -hitInfo.worldNormal;
+            fromIOR = mediaIOR;
+            toIOR = airIOR;
+          }
+          vec3 refractDir = refract(rayDirection, interactionNormal, fromIOR / toIOR);
+          vec3 reflectDir = reflect(rayDirection, interactionNormal);
 
-          vec3 refractDir = refract(rayDirection, hitInfo.worldNormal, airIOR / mediaIOR);
-          vec3 reflectDir = reflect(rayDirection, hitInfo.worldNormal);
-
-          float fresnelR = getFresnelR(airIOR, mediaIOR, rayDirection, hitInfo.worldNormal, false);
+          float fresnelR = getFresnelR(fromIOR, toIOR, rayDirection, interactionNormal, false);
           float rand = stepAndOutputRNGFloat(rngState);
 
           if (rand < fresnelR)
           {
             // Reflect
             rayDirection = reflectDir;
-            rayOrigin = hitInfo.worldPosition + hitInfo.worldNormal * 0.0001;
-            // accumulatedRayColor += vec3(0.9); - TODO?: specular color?
+            rayOrigin = hitInfo.worldPosition;// + rayDirection * 0.0001;
             payload.depth++;
             continue;
           }
           else
           {
-            // Refract
-            rayDirection = refractDir;
+            if (refractDir == vec3(0.0))
+            {
+              // Total internal reflection
+              rayDirection = reflectDir;
+            }
+            else
+            {
+              // Refract
+              rayDirection = refractDir;
+            }
           }
 
         }
@@ -609,7 +626,6 @@ void main()
         }
         if(hitInfo.hasMedium && sampleDistance(mSample, dist, rngState))
         {
-          prevMatID = hitInfo.matID;
           throughput *= mSample.scattering * mSample.transmittance / mSample.probSuccess;
 
 
@@ -617,7 +633,11 @@ void main()
           vec3 lightValue = sampleDirectLight(hitInfo.worldPosition, hitInfo.worldNormal, rngState, hitInfo.medium);
           PhaseFunctionSample phase = {-rayDirection, vec3(0)};
           float phaseEval = evalPhaseFunction(phase, hitInfo.medium);
-          accumulatedRayColor += throughput * lightValue * phaseEval;
+
+          // If we want, we can add to the color right here and then add it to the samples
+          // Instead of waiting for the end of the path
+          // This can speed up rendering and convergence, but the colors will be a bit different
+          // accumulatedRayColor += throughput * lightValue * phaseEval;
 
           // Sample phase function
           float phaseVal = samplePhaseFunction(phase, hitInfo.medium, rngState);
@@ -627,30 +647,36 @@ void main()
           }
           throughput *= phaseVal;
 
-
-
           // Set the new ray direction
           rayDirection = phase.outDir;
           rayOrigin = hitInfo.worldPosition + rayDirection * mSample.t;
         } 
         else
         {
-          prevMatID = hitInfo.matID;
           if (hitInfo.hasMedium)
           {
             // We're either out of media or RNG failed the sampling, so we just apply the transmittance 
             // and continue tracing behind the media
             throughput *= mSample.transmittance / mSample.probFail;
 
-
             // Move the origin to the end of the medium either way
             // Hit position + direction unaffected by reflection/refraction
-            rayOrigin = hitInfo.worldPosition + rayDirection * dist;
+            rayOrigin = hitInfo.worldPosition + rayDirection * mSample.t;
             
-            vec3 refractDir = refract(rayDirection, hitInfo.worldNormal, mediaIOR / airIOR);
-            vec3 reflectDir = reflect(rayDirection, hitInfo.worldNormal);
+            vec3 interactionNormal = hitInfo.worldNormal;
+            float fromIOR = mediaIOR;
+            float toIOR = airIOR;
+            if (dot(rayDirection, hitInfo.worldNormal) > 0)
+            {
+              interactionNormal = -hitInfo.worldNormal;
+              fromIOR = airIOR;
+              toIOR = mediaIOR;
+            }
 
-            float fresnelR = getFresnelR(mediaIOR, airIOR, rayDirection, hitInfo.worldNormal, false);
+            vec3 refractDir = refract(rayDirection, interactionNormal, fromIOR / toIOR);
+            vec3 reflectDir = reflect(rayDirection, interactionNormal);
+
+            float fresnelR = getFresnelR(fromIOR, toIOR, rayDirection, interactionNormal, false);
             float rand = stepAndOutputRNGFloat(rngState);
 
             if (rand < fresnelR)
@@ -660,8 +686,17 @@ void main()
             }
             else
             {
-              // Refract
-              rayDirection = refractDir;
+              if (refractDir == vec3(0.0))
+              {
+                // Total internal reflection
+                rayDirection = reflectDir;
+              }
+              else
+              {
+                // Refract
+                rayDirection = refractDir;
+                
+              }
             }
             payload.depth++;
             continue;
@@ -687,7 +722,7 @@ void main()
           accumulatedRayColor += throughput * lightValue * diffuseEval(-rayDirection, wo) * hitInfo.color;
 
           rayDirection = normalize(wo);
-          rayOrigin = hitInfo.worldPosition + hitInfo.worldNormal * 0.0001;
+          rayOrigin = hitInfo.worldPosition + rayDirection * 0.0001;
         }
       }
       else
@@ -696,7 +731,7 @@ void main()
         break;
       }
       payload.depth++;
-      if (payload.depth > 16)
+      if (payload.depth > 64)
       {
         // Russian roulette
         float throughputMax = max(max(throughput.r, throughput.g), throughput.b);
