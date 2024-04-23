@@ -8,6 +8,10 @@ const float PI = 3.14159265359;
 const float INV_PI = 0.31830988618;
 const float TWOPI = 6.28318530718;
 
+// Scaling factor for the media coefficients
+// 1: 1 scene unit = 1 mm; 10: 1 scene unit = 1 cm; 1000: 1 scene unit = 1 m
+const int scale = 10;
+
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
 struct MediumBuffer
@@ -60,9 +64,9 @@ float mediaIOR = 1.55;
 vec3 reflectance = vec3(0.8);
 
 // The camera location in world space
-const vec3 cameraOrigin = vec3(3.2, 4.2, 6.5);
+const vec3 cameraOrigin = vec3(0.2, 4.2, 6.5);
 
-const vec3 lightPos = vec3(2.001, 5.0, 6.0);
+const vec3 lightPos = vec3(-1.001, 5.0, 6.0);
 const vec3 lightColor = vec3(0.8, 0.8, 0.6);
 const vec3 lightIntensity = lightColor * 100.0;
 
@@ -108,7 +112,7 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
   {
     if (result.matID == uint(media[i].matID))
     {
-      result.medium = Medium(media[i].scattering, media[i].absorption, media[i].anisotropy);
+      result.medium = Medium(media[i].scattering * scale, media[i].absorption * scale, media[i].anisotropy);
       result.hasMedium = true;
       break;
     }
@@ -168,27 +172,27 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
   result.color = vec3(0.8f);
 
   // Checkerboard pattern
-  // if((  int(floor(result.worldPosition.x)) % 2 == 0 && int(floor(result.worldPosition.y)) % 2 == 0) 
-  //   || (int(floor(result.worldPosition.x)) % 2 != 0 && int(floor(result.worldPosition.y)) % 2 != 0))
-  // {
-  //   result.color = vec3(0.8f, 0.8f, 0.8f);
-  // }
-  // else
-  // {
-  //   result.color = vec3(0.3f, 0.3f, 0.3f);
-  // }
+  if((  int(floor(result.worldPosition.x)) % 2 == 0 && int(floor(result.worldPosition.y)) % 2 == 0) 
+    || (int(floor(result.worldPosition.x)) % 2 != 0 && int(floor(result.worldPosition.y)) % 2 != 0))
+  {
+    result.color = vec3(0.8f, 0.8f, 0.8f);
+  }
+  else
+  {
+    result.color = vec3(0.3f, 0.3f, 0.3f);
+  }
 
   // Cornell sides
-  const float dotX = dot(result.worldNormal, vec3(1.0, 0.0, 0.0));
-  const float dotY = dot(result.worldNormal, vec3(0.0, 1.0, 0.0));
-  if(dotX > 0.99)
-  {
-    result.color = vec3(0.8, 0.0, 0.0);
-  }
-  else if(dotX < -0.99)
-  {
-    result.color = vec3(0.0, 0.8, 0.0);
-  }
+  // const float dotX = dot(result.worldNormal, vec3(1.0, 0.0, 0.0));
+  // const float dotY = dot(result.worldNormal, vec3(0.0, 1.0, 0.0));
+  // if(dotX > 0.99)
+  // {
+  //   result.color = vec3(0.8, 0.0, 0.0);
+  // }
+  // else if(dotX < -0.99)
+  // {
+  //   result.color = vec3(0.0, 0.8, 0.0);
+  // }
 
   return result;
 }
@@ -366,7 +370,6 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState, Medium medi
         return vec3(0.0);
       }
       vec3 mediumTransmittance = evalTransmittance(rayQueryGetIntersectionTEXT(distRayQuery, true), mediumHitInfo.medium);
-      transmittance *= vec3(0.7);
       transmittance *= mediumTransmittance;
     }
   }
@@ -514,7 +517,7 @@ void main()
   const float fovVerticalSlope = 1.0 / 5.0;
   vec3 summedPixelColor = vec3(0.0);
 
-  const int NUM_SAMPLES = 512;
+  const int NUM_SAMPLES = 2048;
   for(int sampleIdx = 0; sampleIdx < NUM_SAMPLES; sampleIdx++)
   {
     vec3 rayOrigin = cameraOrigin;
