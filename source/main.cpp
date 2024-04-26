@@ -23,7 +23,6 @@
 #include <stb_image_write.h>
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
-#include <GLFW/glfw3.h>
 
 static const uint64_t render_width = 1920;
 static const uint64_t render_height = 1080;
