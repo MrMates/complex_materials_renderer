@@ -76,7 +76,7 @@ Model::Model(tinyobj::ObjReader reader,
 	allocator.finalizeAndReleaseStaging();
 }
 
-nvvk::RaytracingBuilderKHR::BlasInput Model::GetBLASInput(nvvk::Context& context, bool isOpaque)
+nvvk::RaytracingBuilderKHR::BlasInput Model::GetBLASInput(nvvk::Context& context)
 {
 	nvvk::RaytracingBuilderKHR::BlasInput blas;
 
@@ -98,8 +98,7 @@ nvvk::RaytracingBuilderKHR::BlasInput Model::GetBLASInput(nvvk::Context& context
 	VkAccelerationStructureGeometryKHR geometry = nvvk::make<VkAccelerationStructureGeometryKHR>();
 	geometry.geometry.triangles = triangles;
 	geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-	if (isOpaque) geometry.flags = 0;
-	else geometry.flags = VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
+	geometry.flags = 0;
 	blas.asGeometry.emplace_back(geometry);
 
 	// Create offset info that allows us to say how many triangles and vertices to read

@@ -17,7 +17,7 @@ public:
 		VkCommandPool& cmdPool,
 		std::string filepath);
 
-	nvvk::RaytracingBuilderKHR::BlasInput GetBLASInput(nvvk::Context& context, bool isOpaque);
+	nvvk::RaytracingBuilderKHR::BlasInput GetBLASInput(nvvk::Context& context);
 
 	nvvk::Buffer vertexBuffer, indexBuffer, materialIdBuffer, mediaDefinitionsBuffer;
 private:

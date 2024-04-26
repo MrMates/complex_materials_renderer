@@ -147,7 +147,7 @@ int main(int argc, const char** argv)
 	// Describe the bottom-level acceleration structure (BLAS)
 	std::vector<nvvk::RaytracingBuilderKHR::BlasInput> blases;
 
-	blases.push_back(cornellBoxModel.GetBLASInput(context, true));
+	blases.push_back(cornellBoxModel.GetBLASInput(context));
 	// Create the BLAS
 	nvvk::RaytracingBuilderKHR raytracingBuilder;
 	raytracingBuilder.setup(context, &allocator, context.m_queueGCT);
