@@ -3,6 +3,7 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include <chrono>
 
 #include <nvvk/context_vk.hpp>
 #include <nvvk/structs_vk.hpp>
@@ -33,6 +34,7 @@ static const uint64_t workgroup_height = 32;
 
 int main(int argc, const char** argv)
 {
+	auto startCPU = std::chrono::high_resolution_clock::now();
 	/* DEVICE SETUP */
 
 	// Create the Vulkan context, consisting of an instance, device, physical device, and queues.
@@ -305,9 +307,6 @@ int main(int argc, const char** argv)
 		imageLinear.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		1, &region);
 
-	// Add a command that says "Make it so that memory writes by the vkCmdFillBuffer call
-	// are available to read from the CPU." (In other words, "Flush the GPU caches
-	// so the CPU can read the data.") To do this, we use a memory barrier.
 	VkMemoryBarrier memoryBarrier = nvvk::make<VkMemoryBarrier>();
 	memoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;	 // Make transfer writes
 	memoryBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;       // Readable by the CPU
@@ -318,12 +317,15 @@ int main(int argc, const char** argv)
 		1, &memoryBarrier,                        // An array of memory barriers
 		0, nullptr, 0, nullptr);                  // No other barriers
 
+	auto endCPU = std::chrono::high_resolution_clock::now();
+
 	// End and submit the command buffer, then wait for it to finish:
 	Utils::EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, cmdBuffer);
 
 	// Wait for the GPU to finish
 	NVVK_CHECK(vkQueueWaitIdle(context.m_queueGCT));
 
+	auto endGPU = std::chrono::high_resolution_clock::now();
 
 	// Get the image data back from the GPU
 	void* data = allocator.map(imageLinear);
@@ -345,4 +347,8 @@ int main(int argc, const char** argv)
 	allocator.destroy(image);
 	allocator.deinit();
 	context.deinit();                    // Don't forget to clean up at the end of the program!
+
+	std::cout << "Stats:\n";
+	std::cout << "CPU setup time: " << std::chrono::duration_cast<std::chrono::milliseconds>(endCPU - startCPU).count() << " ms\n";
+	std::cout << "GPU render time: " << std::chrono::duration_cast<std::chrono::milliseconds>(endGPU - endCPU).count() << " ms\n";
 }
