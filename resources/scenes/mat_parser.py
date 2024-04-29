@@ -37,6 +37,39 @@ def get_from_dictionary():
 	temp['sigma_s'] = dictionary[choice]['sigma_s']
 	temp['sigma_a'] = dictionary[choice]['sigma_a']
 	temp['g'] = dictionary[choice]['g']
+	temp['ior'] = dictionary[choice]['ior']
+
+	return temp
+
+def get_scene_from_input():
+	temp = dict()
+
+	camera = input("Enter comma separated camera position (x, y, z): ")
+	camera = [float(x) for x in camera.split(',')]
+
+	temp['camera'] = camera
+
+	cameraLookAt = input("Enter comma separated camera look at point (x, y, z): ")
+	cameraLookAt = [float(x) for x in cameraLookAt.split(',')]
+
+	temp['cameraLookAt'] = cameraLookAt
+
+	fov = input("Enter camera FOV: ")
+	temp['fov'] = float(fov)
+
+	lightPos = input("Enter comma separated light position (x, y, z): ")
+	lightPos = [float(x) for x in lightPos.split(',')]
+	temp['lightPos'] = lightPos
+
+	lightColor = input("Enter comma separated light color (r, g, b): ")
+	lightColor = [float(x) for x in lightColor.split(',')]
+	temp['lightColor'] = lightColor
+
+	lightIntensity = input("Enter light intensity: ")
+	temp['lightIntensity'] = float(lightIntensity)
+
+	scale = input("Enter scale (1: 1 scene unit = 1 mm; 10: 1 su = 1 cm; 1000: 1 su = 1 m; etc.): ")
+	temp['scale'] = float(scale)
 
 	return temp
 
@@ -61,6 +94,10 @@ def get_from_input():
 
 	temp['g'] = g
 
+	ior = input("Enter the index of refraction: ")
+
+	temp['ior'] = float(ior)
+
 	return temp
 
 if __name__ == "__main__":
@@ -81,6 +118,20 @@ if __name__ == "__main__":
 	mat_file += ".json"
 
 	mat = dict()
+
+	choice = input("Do you want to use the default scene settings (camera position, light position, etc.)? (y/n): ")
+	if choice == 'y':
+		temp = dict()
+		temp["camera"] = [0.2, 4.2, 6.5]
+		temp["cameraLookAt"] = [0.0, 4.1, 0.2]
+		temp["fov"] = 36.0
+		temp["lightPos"] = [-1.001, 5.0, 6.0]
+		temp["lightColor"] = [0.8, 0.8, 0.6]
+		temp["lightIntensity"] = 100.0
+		temp["scale"] = 10.0
+		mat["scene"] = temp
+	else:
+		mat["scene"] = get_scene_from_input()
 
 	while True:
 

@@ -8,10 +8,6 @@ const float PI = 3.14159265359;
 const float INV_PI = 0.31830988618;
 const float TWOPI = 6.28318530718;
 
-// Scaling factor for the media coefficients
-// 1: 1 scene unit = 1 mm; 10: 1 scene unit = 1 cm; 1000: 1 scene unit = 1 m
-const int scale = 10;
-
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
 struct MediumBuffer
@@ -20,7 +16,25 @@ struct MediumBuffer
   vec3 scattering; // sigma s
   vec3 absorption; // sigma a
   vec3 anisotropy; // g
+  float ior;
 };
+
+layout(push_constant) uniform PushConstants
+{
+  int pcSampleCount;
+  int pcBackgroundSelect;
+  float pcCameraOrigin[3];
+  float pcLookAt[3];
+  float pcFOV;
+  float pcLightPos[3];
+  float pcLightColor[3];
+  float pcLightIntensity;
+  float pcScale;
+};
+
+// Scaling factor for the media coefficients
+// 1: 1 scene unit = 1 mm; 10: 1 scene unit = 1 cm; 1000: 1 scene unit = 1 m
+float scale = pcScale;
 
 layout(binding = 0, set = 0, rgba32f) uniform image2D storageImage;
 layout(binding = 1, set = 0) uniform accelerationStructureEXT tlas;
@@ -49,6 +63,7 @@ struct Medium
   vec3 scattering; // sigma s
   vec3 absorption; // sigma a
   vec3 anisotropy; // g
+  float ior;
 };
 
 struct RayPayload
@@ -57,18 +72,17 @@ struct RayPayload
   float t;
 };
 
-Medium none = Medium(vec3(0), vec3(0), vec3(0));
+Medium none = Medium(vec3(0), vec3(0), vec3(0), 1.00);
 
 float airIOR = 1.00;
-float mediaIOR = 1.55;
 vec3 reflectance = vec3(0.8);
 
 // The camera location in world space
-const vec3 cameraOrigin = vec3(0.2, 4.2, 6.5);
+vec3 cameraOrigin = vec3(pcCameraOrigin[0], pcCameraOrigin[1], pcCameraOrigin[2]);
 
-const vec3 lightPos = vec3(-1.001, 5.0, 6.0);
-const vec3 lightColor = vec3(0.8, 0.8, 0.6);
-const vec3 lightIntensity = lightColor * 100.0;
+vec3 lightPos = vec3(pcLightPos[0], pcLightPos[1], pcLightPos[2]);
+vec3 lightColor = vec3(pcLightColor[0], pcLightColor[1], pcLightColor[2]);
+vec3 lightIntensity = lightColor * pcLightIntensity;
 
 struct HitInfo
 {
@@ -112,7 +126,7 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
   {
     if (result.matID == uint(media[i].matID))
     {
-      result.medium = Medium(media[i].scattering * scale, media[i].absorption * scale, media[i].anisotropy);
+      result.medium = Medium(media[i].scattering * scale, media[i].absorption * scale, media[i].anisotropy, media[i].ior);
       result.hasMedium = true;
       break;
     }
@@ -171,28 +185,33 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
 
   result.color = vec3(0.8f);
 
-  // Checkerboard pattern
-  if((  int(floor(result.worldPosition.x)) % 2 == 0 && int(floor(result.worldPosition.y)) % 2 == 0) 
-    || (int(floor(result.worldPosition.x)) % 2 != 0 && int(floor(result.worldPosition.y)) % 2 != 0))
+  if (pcBackgroundSelect == 1)
   {
-    result.color = vec3(0.8f, 0.8f, 0.8f);
+    // Checkerboard pattern
+    if((  int(floor(result.worldPosition.x)) % 2 == 0 && int(floor(result.worldPosition.y)) % 2 == 0) 
+      || (int(floor(result.worldPosition.x)) % 2 != 0 && int(floor(result.worldPosition.y)) % 2 != 0))
+    {
+      result.color = vec3(0.8f, 0.8f, 0.8f);
+    }
+    else
+    {
+      result.color = vec3(0.3f, 0.3f, 0.3f);
+    }
   }
-  else
+  else if (pcBackgroundSelect == 2)
   {
-    result.color = vec3(0.3f, 0.3f, 0.3f);
+    // Cornell sides
+    const float dotX = dot(result.worldNormal, vec3(1.0, 0.0, 0.0));
+    const float dotY = dot(result.worldNormal, vec3(0.0, 1.0, 0.0));
+    if(dotX > 0.99)
+    {
+      result.color = vec3(0.8, 0.0, 0.0);
+    }
+    else if(dotX < -0.99)
+    {
+      result.color = vec3(0.0, 0.8, 0.0);
+    }
   }
-
-  // Cornell sides
-  // const float dotX = dot(result.worldNormal, vec3(1.0, 0.0, 0.0));
-  // const float dotY = dot(result.worldNormal, vec3(0.0, 1.0, 0.0));
-  // if(dotX > 0.99)
-  // {
-  //   result.color = vec3(0.8, 0.0, 0.0);
-  // }
-  // else if(dotX < -0.99)
-  // {
-  //   result.color = vec3(0.0, 0.8, 0.0);
-  // }
 
   return result;
 }
@@ -221,8 +240,12 @@ vec3 evalTransmittance(float dist, Medium medium)
   return transmittance;
 }
 
-vec3 diffuseEval(vec3 wi, vec3 wo)
+vec3 diffuseEval(vec3 wi, vec3 wo, vec3 normal)
 {
+  if(dot(wi, normal) <= 0.0 || dot(wo, normal) <= 0.0)
+  {
+    return vec3(0.0);
+  }
   if(wi.z <= 0.0 || wo.z <= 0.0)
   {
     return vec3(0.0);
@@ -231,9 +254,13 @@ vec3 diffuseEval(vec3 wi, vec3 wo)
   return reflectance * (INV_PI * wo.z);
 }
 
-vec3 diffuseSample(vec3 wi, inout vec3 wo, inout uint rngState)
+vec3 diffuseSample(vec3 wi, vec3 normal, inout vec3 wo, inout uint rngState)
 {
-  if(wi.z <= 0)
+  if(dot(wi, normal) <= 0.0)
+  {
+    return vec3(0.0);
+  }
+  if(wi.z <= 0.0)
   {
     return vec3(0.0);
   }
@@ -289,7 +316,7 @@ float getFresnelR(float n1, float n2, vec3 inDir, vec3 normal, bool fast)
   // Full Fresnel
   float theta1 = acos(dot(normalize(inDir), normalize(normal)));
   if (dot(inDir, normal) < 0.0) {
-    theta1 = PI - theta1;
+    theta1 = acos(dot(normalize(inDir), normalize(-normal)));
   }
   float theta2 = asin(n1/n2 * sin(theta1));
 
@@ -305,75 +332,87 @@ float getFresnelR(float n1, float n2, vec3 inDir, vec3 normal, bool fast)
 
 vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState, Medium medium)
 {
+  Medium current = medium;
+  vec3 origin = point;
   vec3 lightDir = lightPos - point;
   float lightDist = length(lightDir);
   float invDist = 1.0 / lightDist;
 
   vec3 lightValue = lightIntensity * invDist * invDist;
 
-  // Shadow smoothing
-  lightDir.x += 0.05 * (stepAndOutputRNGFloat(rngState) - 0.5);
-  lightDir.y += 0.05 * (stepAndOutputRNGFloat(rngState) - 0.5);
-  lightDir.z += 0.05 * (stepAndOutputRNGFloat(rngState) - 0.5);
-
   lightDir = normalize(lightDir);
   vec3 transmittance = vec3(1.0);
 
-  rayQueryEXT lightRayQuery;
-  rayQueryInitializeEXT(lightRayQuery,
-                        tlas,
-                        gl_RayFlagsNoneEXT,
-                        0xFF,
-                        point,
-                        0.0001,
-                        lightDir,
-                        lightDist);
-
-  while(rayQueryProceedEXT(lightRayQuery))
+  while (lightDist > 0)
   {
-    rayQueryConfirmIntersectionEXT(lightRayQuery);
-  }
 
-  if(rayQueryGetIntersectionTypeEXT(lightRayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
-  {
-    HitInfo hitInfo = getObjectHitInfo(lightRayQuery, true);
-
-    if (!hitInfo.hasMedium) // not medium
-    {
-      // light is fully occluded
-      return vec3(0.0);
-    }
-
-    lightDist -= rayQueryGetIntersectionTEXT(lightRayQuery, true);
-
-    rayQueryEXT distRayQuery;
-    rayQueryInitializeEXT(distRayQuery,
+    rayQueryEXT lightRayQuery;
+    rayQueryInitializeEXT(lightRayQuery,
                           tlas,
                           gl_RayFlagsNoneEXT,
                           0xFF,
-                          hitInfo.worldPosition,
+                          origin,
                           0.0001,
                           lightDir,
-                          lightDist);
+                          lightDist * 0.999);
 
-    while(rayQueryProceedEXT(distRayQuery))
+    while(rayQueryProceedEXT(lightRayQuery))
     {
-      rayQueryConfirmIntersectionEXT(distRayQuery);
+      rayQueryConfirmIntersectionEXT(lightRayQuery);
     }
 
-    if(rayQueryGetIntersectionTypeEXT(distRayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
+    if(rayQueryGetIntersectionTypeEXT(lightRayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
     {
-      HitInfo mediumHitInfo = getObjectHitInfo(distRayQuery, true);
-      if (!mediumHitInfo.hasMedium)
+      HitInfo hitInfo = getObjectHitInfo(lightRayQuery, true);
+
+      if (!hitInfo.hasMedium) // not medium
       {
         // light is fully occluded
         return vec3(0.0);
       }
-      vec3 mediumTransmittance = evalTransmittance(rayQueryGetIntersectionTEXT(distRayQuery, true), mediumHitInfo.medium);
-      transmittance *= mediumTransmittance;
+
+      lightDist -= rayQueryGetIntersectionTEXT(lightRayQuery, true);
+
+      rayQueryEXT distRayQuery;
+      rayQueryInitializeEXT(distRayQuery,
+                            tlas,
+                            gl_RayFlagsNoneEXT,
+                            0xFF,
+                            hitInfo.worldPosition,
+                            0.0001,
+                            lightDir,
+                            lightDist);
+
+      while(rayQueryProceedEXT(distRayQuery))
+      {
+        rayQueryConfirmIntersectionEXT(distRayQuery);
+      }
+
+      if(rayQueryGetIntersectionTypeEXT(distRayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
+      {
+        HitInfo mediumHitInfo = getObjectHitInfo(distRayQuery, true);
+        if (!mediumHitInfo.hasMedium)
+        {
+          // light is fully occluded
+          return vec3(0.0);
+        }
+        current = hitInfo.medium;
+        vec3 mediumTransmittance = evalTransmittance(min(rayQueryGetIntersectionTEXT(distRayQuery, true), lightDist), current);
+        transmittance *= mediumTransmittance;
+        current = mediumHitInfo.medium;
+        origin = mediumHitInfo.worldPosition;
+        lightDist -= rayQueryGetIntersectionTEXT(distRayQuery, true);
+      }
+      else
+      {
+        lightDist = 0.0;
+      }
+    }
+    else
+    {
+      lightDist = 0.0;
     }
   }
-
   lightValue *= transmittance;
   return lightValue;
 }
@@ -495,10 +534,27 @@ bool sampleDistance(inout MediumSample mSample, float dist, inout uint seed)
   return success;
 }
 
+vec3 reflectRay(vec3 rayDirection, vec3 normal)
+{
+  return rayDirection - 2.0 * dot(rayDirection, normal) * normal;
+}
+
+vec3 refractRay(vec3 rayDirection, vec3 normal, float n1, float n2)
+{
+  float eta = n1 / n2;
+  float cosThetaI = -dot(rayDirection, normal);
+  float sin2ThetaT = eta * eta * (1.0 - cosThetaI * cosThetaI);
+
+  if (sin2ThetaT >= 1.0)
+  {
+    return vec3(0.0);
+  }
+  float cosThetaT = sqrt(1.0 - sin2ThetaT);
+  return eta * rayDirection + (eta * cosThetaI - cosThetaT) * normal;
+}
+
 void main()
 {
-  // debugPrintfEXT("Size: %d; Mat %d: %f, %f, %f\n", uint(mediaSize), uint(media[0].matID), media[0].scattering.r, media[0].scattering.g, media[0].scattering.b);
-
   const ivec2 resolution = imageSize(storageImage);
 
   const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -510,17 +566,20 @@ void main()
 
   uint rngState = uint(resolution.x * pixel.y + pixel.x);  // Initial seed
 
-  // This scene uses a right-handed coordinate system like the OBJ file format, where the
-  // +x axis points right, the +y axis points up, and the -z axis points into the screen.
-
-  // Define the field of view by the vertical slope of the topmost rays:
-  const float fovVerticalSlope = 1.0 / 5.0;
   vec3 summedPixelColor = vec3(0.0);
 
-  const int NUM_SAMPLES = 2048;
+  const int NUM_SAMPLES = pcSampleCount;
   for(int sampleIdx = 0; sampleIdx < NUM_SAMPLES; sampleIdx++)
   {
+    // This program uses a right-handed coordinate system like the OBJ file format, where the
+    // +x axis points right, the +y axis points up, and the -z axis points into the screen.
+
     vec3 rayOrigin = cameraOrigin;
+
+    vec3 lookAt = {pcLookAt[0], pcLookAt[1], pcLookAt[2]};
+    vec3 forward = normalize(lookAt - cameraOrigin);
+    vec3 right = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));
+    vec3 up = normalize(cross(right, forward));
 
     // Randomly sample a point on the pixel
     const vec2 randomPixelCenter = vec2(pixel) + vec2(stepAndOutputRNGFloat(rngState), stepAndOutputRNGFloat(rngState));
@@ -529,7 +588,8 @@ void main()
     const vec2 screenUV          = vec2((2.0 * randomPixelCenter.x - resolution.x) / resolution.y,    //
                                -(2.0 * randomPixelCenter.y - resolution.y) / resolution.y);  // Flip the y axis
 
-    vec3 rayDirection = vec3(fovVerticalSlope * screenUV.x, fovVerticalSlope * screenUV.y, -1.0);
+    float fovRad = TWOPI - radians(pcFOV);
+    vec3 rayDirection = vec3(screenUV.x * right + screenUV.y * up + fovRad * forward);
     rayDirection      = normalize(rayDirection);
 
     vec3 accumulatedRayColor = vec3(0.0);  // The amount of light that made it to the end of the current ray.
@@ -538,7 +598,7 @@ void main()
     RayPayload payload = {0,0};
 
     // Limit the kernel to trace at most 32 segments.
-    while(payload.depth < 128)
+    while(payload.depth < 32)
     {
       rayQueryEXT rayQuery;
       rayQueryInitializeEXT(rayQuery,              // Ray query
@@ -546,7 +606,7 @@ void main()
                             gl_RayFlagsNoneEXT,    // Ray flags
                             0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
                             rayOrigin,             // Ray origin
-                            0.0003,                   // Minimum t-value
+                            0.0001,                   // Minimum t-value
                             rayDirection,          // Ray direction
                             10000.0);              // Maximum t-value
 
@@ -564,19 +624,17 @@ void main()
 
         if(hitInfo.hasMedium)
         {
-          vec3 interactionNormal = hitInfo.worldNormal;
           float fromIOR = airIOR;
-          float toIOR = mediaIOR;
+          float toIOR = hitInfo.medium.ior;
           if (dot(rayDirection, hitInfo.worldNormal) > 0)
           {
-            interactionNormal = -hitInfo.worldNormal;
-            fromIOR = mediaIOR;
+            fromIOR = hitInfo.medium.ior;
             toIOR = airIOR;
           }
-          vec3 refractDir = refract(rayDirection, interactionNormal, fromIOR / toIOR);
-          vec3 reflectDir = reflect(rayDirection, interactionNormal);
+          vec3 refractDir = normalize(refractRay(rayDirection, hitInfo.worldNormal, fromIOR, toIOR));
+          vec3 reflectDir = normalize(reflectRay(rayDirection, hitInfo.worldNormal));
 
-          float fresnelR = getFresnelR(fromIOR, toIOR, rayDirection, interactionNormal, false);
+          float fresnelR = getFresnelR(fromIOR, toIOR, rayDirection, hitInfo.worldNormal, false);
           float rand = stepAndOutputRNGFloat(rngState);
 
           if (rand < fresnelR)
@@ -600,7 +658,7 @@ void main()
               rayDirection = refractDir;
             }
           }
-
+          payload.depth++;
         }
 
         vec3 newDirection = normalize(rayDirection);
@@ -622,11 +680,6 @@ void main()
         HitInfo mediumEndHitInfo = getObjectHitInfo(rayQueryDist, false);
 
         MediumSample mSample = {0, hitInfo.medium.absorption, hitInfo.medium.scattering, 0, 0, vec3(0)};
-        if (hitInfo.hasMedium)
-        {
-          mSample.absorption = hitInfo.medium.absorption;
-          mSample.scattering = hitInfo.medium.scattering;
-        }
         if(hitInfo.hasMedium && sampleDistance(mSample, dist, rngState))
         {
           throughput *= mSample.scattering * mSample.transmittance / mSample.probSuccess;
@@ -641,10 +694,6 @@ void main()
 
           // Sample phase function
           float phaseVal = samplePhaseFunction(phase, hitInfo.medium, rngState);
-          if (phaseVal < 1e-20)
-          {
-            break;
-          }
           throughput *= phaseVal;
 
           // Set the new ray direction
@@ -663,20 +712,17 @@ void main()
             // Hit position + direction unaffected by reflection/refraction
             rayOrigin = hitInfo.worldPosition + rayDirection * mSample.t;
             
-            vec3 interactionNormal = hitInfo.worldNormal;
-            float fromIOR = mediaIOR;
-            float toIOR = airIOR;
+            float fromIOR = airIOR;
+            float toIOR = hitInfo.medium.ior;
             if (dot(rayDirection, hitInfo.worldNormal) > 0)
             {
-              interactionNormal = -hitInfo.worldNormal;
-              fromIOR = airIOR;
-              toIOR = mediaIOR;
+              fromIOR = hitInfo.medium.ior;
+              toIOR = airIOR;
             }
+            vec3 refractDir = normalize(refractRay(rayDirection, hitInfo.worldNormal, fromIOR, toIOR));
+            vec3 reflectDir = normalize(reflectRay(rayDirection, hitInfo.worldNormal));
 
-            vec3 refractDir = refract(rayDirection, interactionNormal, fromIOR / toIOR);
-            vec3 reflectDir = reflect(rayDirection, interactionNormal);
-
-            float fresnelR = getFresnelR(fromIOR, toIOR, rayDirection, interactionNormal, false);
+            float fresnelR = getFresnelR(fromIOR, toIOR, rayDirection, hitInfo.worldNormal, false);
             float rand = stepAndOutputRNGFloat(rngState);
 
             if (rand < fresnelR)
@@ -695,7 +741,6 @@ void main()
               {
                 // Refract
                 rayDirection = refractDir;
-                
               }
             }
             payload.depth++;
@@ -707,19 +752,19 @@ void main()
 
           if(dot(rayDirection, hitInfo.worldNormal) > 0)
           {
-            rayDirection = -rayDirection;
+            break;
           }
 
-          vec3 bsdfVal = diffuseSample(-rayDirection, wo, rngState);
+          vec3 bsdfVal = diffuseSample(-rayDirection, hitInfo.worldNormal, wo, rngState);
           if(bsdfVal == vec3(0.0))
           {
             break;
           }
 
           throughput *= bsdfVal;
-          vec3 lightValue = sampleDirectLight(hitInfo.worldPosition, hitInfo.worldNormal, rngState, hitInfo.medium);
+          vec3 lightValue = sampleDirectLight(hitInfo.worldPosition, hitInfo.worldNormal, rngState, none);
 
-          accumulatedRayColor += throughput * lightValue * diffuseEval(-rayDirection, wo) * hitInfo.color;
+          accumulatedRayColor += throughput * lightValue * diffuseEval(-rayDirection, wo, hitInfo.worldNormal) * hitInfo.color;
 
           rayDirection = normalize(wo);
           rayOrigin = hitInfo.worldPosition + rayDirection * 0.0001;
@@ -731,7 +776,7 @@ void main()
         break;
       }
       payload.depth++;
-      if (payload.depth > 64)
+      if (payload.depth > 16)
       {
         // Russian roulette
         float throughputMax = max(max(throughput.r, throughput.g), throughput.b);
@@ -746,13 +791,7 @@ void main()
     summedPixelColor += accumulatedRayColor;
   }
 
-
-  float exposure = 1.0;
   vec3 hdrColor = summedPixelColor / float(NUM_SAMPLES);
 
-  //Reinhard toneamp
-  vec3 mappedColor = hdrColor / (hdrColor + vec3(1.0));
-  mappedColor = pow(mappedColor, vec3(1.0 / exposure));
-
-  imageStore(storageImage, pixel, vec4(mappedColor, 0.0));
+  imageStore(storageImage, pixel, vec4(hdrColor, 0.0));
 }

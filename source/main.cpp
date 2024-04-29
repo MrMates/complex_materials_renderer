@@ -4,6 +4,7 @@
 #include <random>
 #include <string>
 #include <chrono>
+#include <array>
 
 #include <nvvk/context_vk.hpp>
 #include <nvvk/structs_vk.hpp>
@@ -31,9 +32,25 @@ static const uint64_t render_height = 1080;
 static const uint64_t workgroup_width = 32;
 static const uint64_t workgroup_height = 32;
 
-
-int main(int argc, const char** argv)
+struct PushConstants
 {
+	int sampleCount;
+	int backgroundSelect;
+	std::array<float, 3> cameraPos;
+	std::array<float, 3> cameraLookAt;
+	float cameraFOV;
+	std::array<float, 3> lightPos;
+	std::array<float, 3> lightColor;
+	float lightIntensity;
+	float scale;
+};
+
+
+int main(int argc, char** argv)
+{
+	Options options{};
+	Utils::parse(argc, argv, &options);
+
 	auto startCPU = std::chrono::high_resolution_clock::now();
 	/* DEVICE SETUP */
 
@@ -112,15 +129,12 @@ int main(int argc, const char** argv)
 	tinyobj::ObjReader       reader;  // Used to read an OBJ file
 	tinyobj::ObjReaderConfig readerConfig;
 	readerConfig.mtl_search_path = searchPaths[0];
-	std::string objFilePath("resources/scenes/studio_corner.obj");
-	if (argc == 2)
-	{
-		objFilePath = argv[1];
-	}
-	reader.ParseFromFile(nvh::findFile(objFilePath, searchPaths));
+
+	reader.ParseFromFile(nvh::findFile(options.objPath.data(), searchPaths));
+
 	assert(reader.Valid());  // Make sure tinyobj was able to parse this file
 
-	Model cornellBoxModel{ reader, allocator, context, cmdPool, nvh::findFile(objFilePath, searchPaths) };
+	Model model{ reader, allocator, context, cmdPool, nvh::findFile(options.objPath.data(), searchPaths), &options};
 
 	VkCommandBuffer imageCmdBuffer = Utils::AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
 	const VkAccessFlags srcAccesses = 0; // Images don't have a layout (not accessible)
@@ -149,7 +163,7 @@ int main(int argc, const char** argv)
 	// Describe the bottom-level acceleration structure (BLAS)
 	std::vector<nvvk::RaytracingBuilderKHR::BlasInput> blases;
 
-	blases.push_back(cornellBoxModel.GetBLASInput(context));
+	blases.push_back(model.GetBLASInput(context));
 	// Create the BLAS
 	nvvk::RaytracingBuilderKHR raytracingBuilder;
 	raytracingBuilder.setup(context, &allocator, context.m_queueGCT);
@@ -195,8 +209,13 @@ int main(int argc, const char** argv)
 	descriptorSetContainer.initLayout();
 	// Create a descriptor pool from the list of bindings with space for 1 set, and allocate that set
 	descriptorSetContainer.initPool(1);
+
+	VkPushConstantRange pushConstantRange;
+	pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	pushConstantRange.offset = 0;
+	pushConstantRange.size = sizeof(PushConstants);
 	// Create a simple pipeline layout from the descriptor set layout:
-	descriptorSetContainer.initPipeLayout();
+	descriptorSetContainer.initPipeLayout(1, &pushConstantRange);
 
 	// Write values into the descriptor set.
 	std::array<VkWriteDescriptorSet, 6> writeDescriptorSets;
@@ -213,22 +232,22 @@ int main(int argc, const char** argv)
 	writeDescriptorSets[1] = descriptorSetContainer.makeWrite(0, 1, &descriptorAS);
 	// 2
 	VkDescriptorBufferInfo vertexDescriptorBufferInfo{};
-	vertexDescriptorBufferInfo.buffer = cornellBoxModel.vertexBuffer.buffer;
+	vertexDescriptorBufferInfo.buffer = model.vertexBuffer.buffer;
 	vertexDescriptorBufferInfo.range = VK_WHOLE_SIZE;
 	writeDescriptorSets[2] = descriptorSetContainer.makeWrite(0, 2, &vertexDescriptorBufferInfo);
 	// 3
 	VkDescriptorBufferInfo indexDescriptorBufferInfo{};
-	indexDescriptorBufferInfo.buffer = cornellBoxModel.indexBuffer.buffer;
+	indexDescriptorBufferInfo.buffer = model.indexBuffer.buffer;
 	indexDescriptorBufferInfo.range = VK_WHOLE_SIZE;
 	writeDescriptorSets[3] = descriptorSetContainer.makeWrite(0, 3, &indexDescriptorBufferInfo);
 	// 4
 	VkDescriptorBufferInfo materialDescriptorBufferInfo{};
-	materialDescriptorBufferInfo.buffer = cornellBoxModel.materialIdBuffer.buffer;
+	materialDescriptorBufferInfo.buffer = model.materialIdBuffer.buffer;
 	materialDescriptorBufferInfo.range = VK_WHOLE_SIZE;
 	writeDescriptorSets[4] = descriptorSetContainer.makeWrite(0, 4, &materialDescriptorBufferInfo);
 	// 5
 	VkDescriptorBufferInfo mediaDescriptorBufferInfo{};
-	mediaDescriptorBufferInfo.buffer = cornellBoxModel.mediaDefinitionsBuffer.buffer;
+	mediaDescriptorBufferInfo.buffer = model.mediaDefinitionsBuffer.buffer;
 	mediaDescriptorBufferInfo.range = VK_WHOLE_SIZE;
 	writeDescriptorSets[5] = descriptorSetContainer.makeWrite(0, 5, &mediaDescriptorBufferInfo);
 
@@ -270,6 +289,30 @@ int main(int argc, const char** argv)
 	VkDescriptorSet descriptorSet = descriptorSetContainer.getSet(0);
 	vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, descriptorSetContainer.getPipeLayout(), 0, 1,
 		&descriptorSet, 0, nullptr);
+
+	PushConstants pushConstants{};
+
+	pushConstants.sampleCount = options.numSamples;
+	pushConstants.backgroundSelect = options.backgroundTexture;
+	pushConstants.lightIntensity = options.lightIntensity;
+	pushConstants.scale = options.scale;
+	pushConstants.cameraFOV = options.cameraFOV;
+
+	for (size_t i = 0; i < 3; i++)
+	{
+		pushConstants.cameraPos[i] = options.cameraPos[i];
+		pushConstants.cameraLookAt[i] = options.cameraLookAt[i];
+		pushConstants.lightPos[i] = options.lightPos[i];
+		pushConstants.lightColor[i] = options.lightColor[i];
+	}
+
+	// Bind push constants
+	vkCmdPushConstants(cmdBuffer,
+		descriptorSetContainer.getPipeLayout(),
+		VK_SHADER_STAGE_COMPUTE_BIT,
+		0,
+		sizeof(PushConstants),
+		&pushConstants);
 
 	// Run the compute shader with enough workgroups to cover the entire buffer:
 	vkCmdDispatch(cmdBuffer, (uint32_t(render_width) + workgroup_width - 1) / workgroup_width,
@@ -329,7 +372,9 @@ int main(int argc, const char** argv)
 
 	// Get the image data back from the GPU
 	void* data = allocator.map(imageLinear);
-	stbi_write_hdr("out.hdr", render_width, render_height, 4, reinterpret_cast<float*>(data));
+	std::string output = options.outName.data();
+	output += ".hdr";
+	stbi_write_hdr(output.data(), render_width, render_height, 4, reinterpret_cast<float*>(data));
 	allocator.unmap(imageLinear);
 
 
@@ -337,10 +382,10 @@ int main(int argc, const char** argv)
 	vkDestroyShaderModule(context, rayTraceModule, nullptr);
 	descriptorSetContainer.deinit();
 	raytracingBuilder.destroy();
-	allocator.destroy(cornellBoxModel.vertexBuffer);
-	allocator.destroy(cornellBoxModel.indexBuffer);
-	allocator.destroy(cornellBoxModel.materialIdBuffer);
-	allocator.destroy(cornellBoxModel.mediaDefinitionsBuffer);
+	allocator.destroy(model.vertexBuffer);
+	allocator.destroy(model.indexBuffer);
+	allocator.destroy(model.materialIdBuffer);
+	allocator.destroy(model.mediaDefinitionsBuffer);
 	vkDestroyCommandPool(context, cmdPool, nullptr);
 	allocator.destroy(imageLinear);
 	vkDestroyImageView(context, imageView, nullptr);

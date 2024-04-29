@@ -9,7 +9,8 @@ Model::Model(tinyobj::ObjReader reader,
 	nvvk::ResourceAllocatorDedicated& allocator,
 	nvvk::Context& context,
 	VkCommandPool& cmdPool,
-	std::string filepath)
+	std::string filepath,
+	Options* options)
 {
 	objVertices = reader.GetAttrib().GetVertices();
 	const std::vector<tinyobj::shape_t>& objShapes = reader.GetShapes();  // All shapes in the file
@@ -37,10 +38,39 @@ Model::Model(tinyobj::ObjReader reader,
 	assert(f.is_open() && "Media definition .json file not found. Run mat_parser.py for this .obj scene first.");
 	auto data = nlohmann::ordered_json::parse(f);
 
-	// Buffer in format count, (id, vec3(sigma_s), vec3(sigma_a), vec3(g))*count
+	// Buffer in format count, (id, vec3(sigma_s), vec3(sigma_a), vec3(g), ior)*count
 	mediaDefinitions.push_back(data.size());
 	for (auto it = data.begin(); it != data.end(); ++it)
 	{
+		// Scene definitions
+		if (it.key() == "scene")
+		{
+			auto& cameraPos = it.value()["camera"];
+			for (size_t i = 0; i < 3; i++)
+			{
+				options->cameraPos[i] = std::stof(cameraPos[i].dump());
+			}
+			auto& cameraLookAt = it.value()["cameraLookAt"];
+			for (size_t i = 0; i < 3; i++)
+			{
+				options->cameraLookAt[i] = std::stof(cameraLookAt[i].dump());
+			}
+			auto& lightPos = it.value()["lightPos"];
+			for (size_t i = 0; i < 3; i++)
+			{
+				options->lightPos[i] = std::stof(lightPos[i].dump());
+			}
+			auto& lightColor = it.value()["lightColor"];
+			for (size_t i = 0; i < 3; i++)
+			{
+				options->lightColor[i] = std::stof(lightColor[i].dump());
+			}
+			options->cameraFOV = it.value()["fov"];
+			options->lightIntensity = it.value()["lightIntensity"];
+			options->scale = it.value()["scale"];
+			continue;
+		}
+
 		mediaDefinitions.push_back(std::stof(it.key()));
 		auto& sigmaS = it.value()["sigma_s"];
 		for (size_t i = 0; i < 3; i++)
@@ -59,6 +89,9 @@ Model::Model(tinyobj::ObjReader reader,
 		{
 			mediaDefinitions.push_back(std::stof(g[i].dump()));
 		}
+
+		auto& ior = it.value()["ior"];
+		mediaDefinitions.push_back(std::stof(ior.dump()));
 	}
 
 	f.close();

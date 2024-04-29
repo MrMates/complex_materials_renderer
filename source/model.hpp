@@ -15,7 +15,8 @@ public:
 		nvvk::ResourceAllocatorDedicated& allocator,
 		nvvk::Context& context,
 		VkCommandPool& cmdPool,
-		std::string filepath);
+		std::string filepath,
+		Options* options);
 
 	nvvk::RaytracingBuilderKHR::BlasInput GetBLASInput(nvvk::Context& context);
 
