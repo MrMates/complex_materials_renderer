@@ -3,3 +3,11 @@ cmake_build
 /resources/scenes/*
 !/resources/scenes/mat_parser.py
 !/resources/scenes/mat_dictionary.json
+!/resources/scenes/cup.*
+/resources/scenes/cup.blend
+!/resources/scenes/cola_glass.*
+/resources/scenes/cola_glass.blend
+!/resources/scenes/stanford_dragon.*
+/resources/scenes/stanford_dragon.blend
+!/resources/scenes/gem_corner.*
+/resources/scenes/gem_corner.blend
