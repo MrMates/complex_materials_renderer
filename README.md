@@ -15,6 +15,8 @@ This project is using **LunarG Vulkan SDK**, available from the official website
 This project also uses [nvpro_core](https://github.com/nvpro-samples/nvpro_core) library from NVIDIA, available under the Apache 2.0 license. This library is required if you intend to compile the source code yourself. The steps to clone the library are specified below.
 
 ## Setup
+*Note:* If you already have the source code (for example from a physical medium), the provided files are preferred. Forwards compatibility with newer versions of nvpro_core is possible, but not guaranteed.
+
 Clone the required repositories and the renderer project itself
 ```
 git clone --recursive --shallow-submodules https://github.com/nvpro-samples/nvpro_core.git
