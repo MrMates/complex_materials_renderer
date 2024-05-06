@@ -1,3 +1,10 @@
+/*
+* File: utils.hpp
+* Author: Matìj Toul (xtoulm00)
+* E-mail: matej.toul@gmail.com
+* Date: 6 May 2024
+*/
+
 #ifndef UTILS_HEADER_FILE
 #define UTILS_HEADER_FILE
 

@@ -1,3 +1,11 @@
+/*
+* File: utils.cpp
+* Author: Matìj Toul (xtoulm00)
+* E-mail: matej.toul@gmail.com
+* Description: File containing some of the utility functions.
+* Date: 6 May 2024
+*/
+
 #include "utils.hpp"
 
 VkCommandBuffer Utils::AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)

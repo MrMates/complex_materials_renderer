@@ -1,3 +1,10 @@
+/*
+* File: model.hpp
+* Author: Matìj Toul (xtoulm00)
+* E-mail: matej.toul@gmail.com
+* Date: 6 May 2024
+*/
+
 #ifndef MODEL_HEADER_FILE
 #define MODEL_HEADER_FILE
 

@@ -1,3 +1,15 @@
+/*
+* File: main.cpp
+* Author: Matìj Toul (xtoulm00)
+* E-mail: matej.toul@gmail.com
+* Description: The entry point of the complex materials renderer.
+* Date: 6 May 2024
+*
+* Note: This file is based on the vk_mini_path_tracer project by NVIDIA Corporation.
+*       However, the code is modified for the purposes of complex materials rendering.
+*       The original project can be found at https://nvpro-samples.github.io/vk_mini_path_tracer/.
+*/
+
 #include <cassert>
 #include <array>
 #include <iostream>

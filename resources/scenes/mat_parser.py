@@ -1,4 +1,15 @@
-#!/usr/bin/env python
+#! /usr/bin/env python
+# -*-coding: utf-8 -*-
+
+"""
+	File: mat_parser.py
+	This script is used to create accompanying JSON files for the obj files.
+	The JSON files contain scene settings and participating media definitions.
+"""
+
+__author__ = "Matěj Toul (xtoulm00)"
+__email__ = "matej.toul@gmail.com"
+__date__ = "6 May 2024"
 
 import sys
 import io
@@ -122,10 +133,10 @@ if __name__ == "__main__":
 	choice = input("Do you want to use the default scene settings (camera position, light position, etc.)? (y/n): ")
 	if choice == 'y':
 		temp = dict()
-		temp["camera"] = [0.2, 4.2, 6.5]
-		temp["cameraLookAt"] = [0.0, 4.1, 0.2]
+		temp["camera"] = [0.0, 1.75, 6.5]
+		temp["cameraLookAt"] = [0.0, 0.9, 0.0]
 		temp["fov"] = 36.0
-		temp["lightPos"] = [-1.001, 5.0, 6.0]
+		temp["lightPos"] = [-1.001, 1.75, 5.0]
 		temp["lightColor"] = [0.8, 0.8, 0.6]
 		temp["lightIntensity"] = 100.0
 		temp["scale"] = 10.0

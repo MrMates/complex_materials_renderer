@@ -1,3 +1,11 @@
+/*
+* File: model.cpp
+* Author: Matìj Toul (xtoulm00)
+* E-mail: matej.toul@gmail.com
+* Description: File implementing the model loading.
+* Date: 6 May 2024
+*/
+
 #include "model.hpp"
 #include "json.hpp"
 using json = nlohmann::ordered_json;

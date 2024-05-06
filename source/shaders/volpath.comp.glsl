@@ -1,14 +1,18 @@
+/*
+* File: volpath.comp.glsl
+* Author: Matěj Toul (xtoulm00)
+* E-mail: matej.toul@gmail.com
+* Description: The main compute shader for the complex materials renderer.
+* Date: 6 May 2024
+*
+* Note: This file is based on the vk_mini_path_tracer project by NVIDIA Corporation.
+*       However, the code is heavily modified for the purposes of complex materials rendering.
+*       The original project can be found at https://nvpro-samples.github.io/vk_mini_path_tracer/.
+*/
+
 #version 460
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_ray_query : require
-#extension GL_EXT_debug_printf : enable
-
-const float INV_FOURPI = 0.07957747154594767;
-const float PI = 3.14159265359;
-const float INV_PI = 0.31830988618;
-const float TWOPI = 6.28318530718;
-
-layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
 struct MediumBuffer
 {
@@ -19,6 +23,7 @@ struct MediumBuffer
   float ior;
 };
 
+layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 layout(push_constant) uniform PushConstants
 {
   int pcSampleCount;
@@ -32,14 +37,8 @@ layout(push_constant) uniform PushConstants
   float pcScale;
 };
 
-// Scaling factor for the media coefficients
-// 1: 1 scene unit = 1 mm; 10: 1 scene unit = 1 cm; 1000: 1 scene unit = 1 m
-float scale = pcScale;
-
 layout(binding = 0, set = 0, rgba32f) uniform image2D storageImage;
 layout(binding = 1, set = 0) uniform accelerationStructureEXT tlas;
-// The scalar layout qualifier here means to align types according to the alignment
-// of their scalar components, instead of e.g. padding them to std140 rules.
 layout(binding = 2, set = 0, scalar) buffer Vertices
 {
   vec3 vertices[];
@@ -58,6 +57,7 @@ layout(binding = 5, set = 0, scalar) buffer Media
   MediumBuffer media[];
 };
 
+/*** Structs ***/
 struct Medium
 {
   vec3 scattering; // sigma s
@@ -71,18 +71,6 @@ struct RayPayload
   int depth;
   float t;
 };
-
-Medium none = Medium(vec3(0), vec3(0), vec3(0), 1.00);
-
-float airIOR = 1.00;
-vec3 reflectance = vec3(0.8);
-
-// The camera location in world space
-vec3 cameraOrigin = vec3(pcCameraOrigin[0], pcCameraOrigin[1], pcCameraOrigin[2]);
-
-vec3 lightPos = vec3(pcLightPos[0], pcLightPos[1], pcLightPos[2]);
-vec3 lightColor = vec3(pcLightColor[0], pcLightColor[1], pcLightColor[2]);
-vec3 lightIntensity = lightColor * pcLightIntensity;
 
 struct HitInfo
 {
@@ -103,6 +91,30 @@ struct MediumSample
   float probSuccess;
   vec3 transmittance;
 };
+/*** End Structs ***/
+
+/*** Constants ***/
+
+const float INV_FOURPI = 0.07957747154594767;
+const float PI = 3.14159265359;
+const float INV_PI = 0.31830988618;
+const float TWOPI = 6.28318530718;
+
+// Scaling factor for the media coefficients
+// 1: 1 scene unit = 1 mm; 10: 1 scene unit = 1 cm; 1000: 1 scene unit = 1 m
+float scale = pcScale;
+
+Medium none = Medium(vec3(0), vec3(0), vec3(0), 1.00);
+float airIOR = 1.00;
+vec3 reflectance = vec3(0.8);
+
+// The camera location in world space
+vec3 cameraOrigin = vec3(pcCameraOrigin[0], pcCameraOrigin[1], pcCameraOrigin[2]);
+vec3 lightPos = vec3(pcLightPos[0], pcLightPos[1], pcLightPos[2]);
+vec3 lightColor = vec3(pcLightColor[0], pcLightColor[1], pcLightColor[2]);
+vec3 lightIntensity = lightColor * pcLightIntensity;
+
+/*** End Constants ***/
 
 HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
 {
@@ -216,6 +228,7 @@ HitInfo getObjectHitInfo(rayQueryEXT rayQuery, bool commited)
   return result;
 }
 
+// RNG credit: https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#antialiasingandpseudorandomnumbergeneration
 // Random number generation using pcg32i_random_t, using inc = 1. Our random state is a uint.
 uint stepRNG(uint rngState)
 {
@@ -231,7 +244,6 @@ float stepAndOutputRNGFloat(inout uint rngState)
   word      = (word >> 22) ^ word;
   return float(word) / 4294967295.0f;
 }
-bool shown = false;
 
 vec3 evalTransmittance(float dist, Medium medium)
 {
@@ -246,10 +258,6 @@ vec3 diffuseEval(vec3 wi, vec3 wo, vec3 normal)
   {
     return vec3(0.0);
   }
-  if(wi.z <= 0.0 || wo.z <= 0.0)
-  {
-    return vec3(0.0);
-  }
 
   return reflectance * (INV_PI * wo.z);
 }
@@ -257,10 +265,6 @@ vec3 diffuseEval(vec3 wi, vec3 wo, vec3 normal)
 vec3 diffuseSample(vec3 wi, vec3 normal, inout vec3 wo, inout uint rngState)
 {
   if(dot(wi, normal) <= 0.0)
-  {
-    return vec3(0.0);
-  }
-  if(wi.z <= 0.0)
   {
     return vec3(0.0);
   }
@@ -365,7 +369,7 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState, Medium medi
     {
       HitInfo hitInfo = getObjectHitInfo(lightRayQuery, true);
 
-      if (!hitInfo.hasMedium) // not medium
+      if (!hitInfo.hasMedium)
       {
         // light is fully occluded
         return vec3(0.0);
@@ -373,6 +377,7 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState, Medium medi
 
       lightDist -= rayQueryGetIntersectionTEXT(lightRayQuery, true);
 
+      // Get the distance to the end of medium
       rayQueryEXT distRayQuery;
       rayQueryInitializeEXT(distRayQuery,
                             tlas,
@@ -397,7 +402,10 @@ vec3 sampleDirectLight(vec3 point, vec3 normal, inout uint rngState, Medium medi
           return vec3(0.0);
         }
         current = hitInfo.medium;
+
+        // Apply medium transmittance for the distance traveled
         vec3 mediumTransmittance = evalTransmittance(min(rayQueryGetIntersectionTEXT(distRayQuery, true), lightDist), current);
+        transmittance *= 0.9;
         transmittance *= mediumTransmittance;
         current = mediumHitInfo.medium;
         origin = mediumHitInfo.worldPosition;
@@ -475,7 +483,7 @@ bool sampleDistance(inout MediumSample mSample, float dist, inout uint seed)
 {
   float rand = stepAndOutputRNGFloat(seed);
   vec3 extinction = mSample.absorption + mSample.scattering;
-  // Strategy: Single - select the lowest variance channel for density
+  // Selecting the channel with lowest variance for density
   float sampleDensity = min(min(extinction.r, extinction.g), extinction.b);
 
   float sampled;
@@ -606,7 +614,7 @@ void main()
                             gl_RayFlagsNoneEXT,    // Ray flags
                             0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
                             rayOrigin,             // Ray origin
-                            0.0001,                   // Minimum t-value
+                            0.0001,                // Minimum t-value
                             rayDirection,          // Ray direction
                             10000.0);              // Maximum t-value
 
@@ -641,7 +649,7 @@ void main()
           {
             // Reflect
             rayDirection = reflectDir;
-            rayOrigin = hitInfo.worldPosition;// + rayDirection * 0.0001;
+            rayOrigin = hitInfo.worldPosition;
             payload.depth++;
             continue;
           }

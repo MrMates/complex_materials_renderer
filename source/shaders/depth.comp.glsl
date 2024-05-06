@@ -1,3 +1,14 @@
+/*
+* File: depth.comp.glsl
+* Author: Matěj Toul (xtoulm00)
+* E-mail: matej.toul@gmail.com
+* Description: Debug shader to show the scene depth. Taken from vk_mini_path_tracer.
+* Date: 6 May 2024
+*
+* Note: This file is based on the vk_mini_path_tracer project by NVIDIA Corporation.
+*       The original project can be found at https://nvpro-samples.github.io/vk_mini_path_tracer/.
+*/
+
 #version 460
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_ray_query : require
